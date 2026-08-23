@@ -515,6 +515,32 @@ static int _nftset_add_element(int nffamily, const char *table_name, const char 
 	return 0;
 }
 
+static int _nftset_should_skip_existing(int ip_exists, unsigned long timeout)
+{
+	(void)timeout;
+	return ip_exists;
+}
+
+#ifdef TEST
+int nftset_should_skip_existing_for_test(int ip_exists, unsigned long timeout)
+{
+	return _nftset_should_skip_existing(ip_exists, timeout);
+}
+
+int nftset_build_add_element_for_test(unsigned long timeout, void *buf, int buf_len)
+{
+	unsigned char addr[4] = {192, 0, 2, 1};
+	void *next = NULL;
+
+	if (buf == NULL || buf_len < PAYLOAD_MAX) {
+		return -1;
+	}
+
+	_nftset_add_element(NFPROTO_IPV4, "filter", "test", addr, sizeof(addr), NULL, 0, timeout, buf, &next);
+	return (uint8_t *)next - (uint8_t *)buf;
+}
+#endif
+
 static int _nftset_process_setflags(uint32_t flags, const unsigned char addr[], int addr_len, unsigned long *timeout,
 									uint8_t **interval_addr, int *interval_addr_len)
 {
@@ -724,7 +750,7 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
 	int ip_exists = _nftset_test_ip_exists(nffamily, tablename, setname, addr, addr_len);
 
-	if (ip_exists) {
+	if (_nftset_should_skip_existing(ip_exists, timeout)) {
 		if (dns_conf.nftset_debug_enable) {
 			char ip_str[INET6_ADDRSTRLEN];
 			if (addr_len == 4) {

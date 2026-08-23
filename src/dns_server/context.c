@@ -40,6 +40,24 @@ void _dns_server_post_context_init(struct dns_server_post_context *context, stru
 	context->request = request;
 }
 
+static int _dns_server_get_nftset_timeout_value(int reply_ttl, int request_ttl, int config_ttl)
+{
+	(void)reply_ttl;
+	int ttl = request_ttl;
+	if (ttl == 0) {
+		ttl = config_ttl;
+	}
+
+	return ttl * 3;
+}
+
+#ifdef TEST
+int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl)
+{
+	return _dns_server_get_nftset_timeout_value(reply_ttl, request_ttl, config_ttl);
+}
+#endif
+
 static void _dns_server_context_add_ip(struct dns_server_post_context *context, const unsigned char *ip_addr)
 {
 	if (context->ip_num < MAX_IP_NUM) {
@@ -664,9 +682,10 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 		return 0;
 	}
 
+	int config_ttl = _dns_server_get_conf_ttl(request, 0);
 	timeout_value = request->ip_ttl * 3;
 	if (timeout_value == 0) {
-		timeout_value = _dns_server_get_conf_ttl(request, 0) * 3;
+		timeout_value = config_ttl * 3;
 	}
 
 	if (conf->ipset_nftset.ipset_timeout_enable) {
@@ -674,7 +693,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 	}
 
 	if (conf->ipset_nftset.nftset_timeout_enable) {
-		nftset_timeout_value = timeout_value;
+		nftset_timeout_value = _dns_server_get_nftset_timeout_value(context->reply_ttl, request->ip_ttl, config_ttl);
 	}
 
 	for (j = 1; j < DNS_RRS_OPT; j++) {

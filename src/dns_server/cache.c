@@ -35,6 +35,21 @@ int _dns_server_expired_cache_ttl(struct dns_cache *cache, int serve_expired_ttl
 	return cache->info.insert_time + cache->info.ttl + serve_expired_ttl - time(NULL);
 }
 
+static int _dns_server_cache_should_update_ipset_nftset(int cache_ttl, int is_visited,
+														 int nftset_timeout_enabled)
+{
+	(void)nftset_timeout_enabled;
+	return cache_ttl == 0 || is_visited == 0;
+}
+
+#ifdef TEST
+int dns_server_cache_should_update_ipset_nftset_for_test(int cache_ttl, int is_visited,
+														  int nftset_timeout_enabled)
+{
+	return _dns_server_cache_should_update_ipset_nftset(cache_ttl, is_visited, nftset_timeout_enabled);
+}
+#endif
+
 static int _dns_cache_is_specify_packet(int qtype)
 {
 	switch (qtype) {
@@ -265,10 +280,8 @@ static int _dns_server_process_cache_packet(struct dns_request *request, struct 
 		goto out;
 	}
 
-	int do_ipset = (dns_cache_get_ttl(dns_cache) == 0);
-	if (dns_cache_is_visited(dns_cache) == 0) {
-		do_ipset = 1;
-	}
+	int do_ipset = _dns_server_cache_should_update_ipset_nftset(
+		dns_cache_get_ttl(dns_cache), dns_cache_is_visited(dns_cache), request->conf->ipset_nftset.nftset_timeout_enable);
 
 	struct dns_server_post_context context;
 	_dns_server_post_context_init(&context, request);

@@ -29,6 +29,12 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len);
 
+#ifdef TEST
+int nftset_should_skip_existing_for_test(int ip_exists, unsigned long timeout);
+
+int nftset_build_add_element_for_test(unsigned long timeout, void *buf, int buf_len);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
