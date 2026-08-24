@@ -475,6 +475,24 @@ msgstr "NFTSet名称格式错误，格式：[#[4|6]:[family#table#set]]"
 msgid "NFTset name, format: [#[4|6]:[family#table#set]]"
 msgstr "NFTSet名称，格式：[#[4|6]:[family#table#set]]"
 
+msgid "NFTset Timeout Extension"
+msgstr "NFTset 固定延长时间"
+
+msgid "NFTset Timeout Multiplier"
+msgstr "NFTset 超时倍数"
+
+msgid "NFTset Minimum Timeout"
+msgstr "NFTset 最小超时"
+
+msgid "Fixed seconds added after multiplying the effective DNS TTL."
+msgstr "有效 DNS TTL 乘以倍数后额外增加的固定秒数。"
+
+msgid "Minimum NFTset element timeout in seconds. The final formula is max(TTL * multiplier + extension, minimum)."
+msgstr "NFTset 元素的最小超时秒数。最终公式为 max(TTL × 倍数 + 固定延长, 最小值)。"
+
+msgid "Multiply the effective DNS TTL before applying the extension and minimum timeout."
+msgstr "先将有效 DNS TTL 乘以此倍数，再应用固定延长和最小超时。"
+
 msgid "NOT RUNNING"
 msgstr "未运行"
 
@@ -518,6 +536,12 @@ msgstr "代理服务器设置"
 
 msgid "Proxy Server URL, format: [socks5|http]://user:pass@ip:port."
 msgstr "代理服务器地址，格式：[socks5|http]://user:pass@ip:port。"
+
+msgid "Refresh Timed NFTset Elements"
+msgstr "刷新带超时的 NFTset 元素"
+
+msgid "Refresh existing timed NFTset elements on DNS replies and valid cache hits."
+msgstr "在 DNS 响应和有效缓存命中时刷新已有带超时的 NFTset 元素。"
 
 msgid ""
 "Proxy server URL format error, format: [socks5|http]://user:pass@ip:port."

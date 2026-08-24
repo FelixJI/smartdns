@@ -484,6 +484,9 @@ struct dns_conf_ipset_nftset {
 	int ipset_timeout_enable;
 	struct dns_ipset_names ipset_no_speed;
 	int nftset_timeout_enable;
+	int nftset_timeout_multiplier;
+	int nftset_timeout_grace;
+	int nftset_timeout_min;
 	struct dns_nftset_names nftset_no_speed;
 };
 

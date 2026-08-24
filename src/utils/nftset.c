@@ -490,7 +490,7 @@ static int _nftset_add_element(int nffamily, const char *table_name, const char 
 	_nftset_addattr(n, PAYLOAD_MAX, NFTA_DATA_VALUE, data, data_len);
 	_nftset_addattr_nest_end(n, nest_elem_key);
 	if (timeout > 0) {
-		uint64_t timeout_value = htobe64(timeout * 1000);
+		uint64_t timeout_value = htobe64((uint64_t)timeout * 1000);
 		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_TIMEOUT, &timeout_value, sizeof(timeout_value));
 		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_EXPIRATION, &timeout_value, sizeof(timeout_value));
 	}

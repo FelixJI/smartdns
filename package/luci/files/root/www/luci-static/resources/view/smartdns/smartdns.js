@@ -417,6 +417,33 @@ return view.extend({
 			return true;
 		}
 
+		// Refresh timed NFTset elements.
+		o = s.taboption("advanced", form.Flag, "nftset_timeout", _("Refresh Timed NFTset Elements"),
+			_("Refresh existing timed NFTset elements on DNS replies and valid cache hits."));
+		o.rmempty = false;
+		o.default = o.disabled;
+
+		o = s.taboption("advanced", form.Value, "nftset_timeout_multiplier", _("NFTset Timeout Multiplier"),
+			_("Multiply the effective DNS TTL before applying the extension and minimum timeout."));
+		o.rmempty = false;
+		o.datatype = "uinteger";
+		o.default = "1";
+		o.depends("nftset_timeout", "1");
+
+		o = s.taboption("advanced", form.Value, "nftset_timeout_grace", _("NFTset Timeout Extension"),
+			_("Fixed seconds added after multiplying the effective DNS TTL."));
+		o.rmempty = false;
+		o.datatype = "uinteger";
+		o.default = "60";
+		o.depends("nftset_timeout", "1");
+
+		o = s.taboption("advanced", form.Value, "nftset_timeout_min", _("NFTset Minimum Timeout"),
+			_("Minimum NFTset element timeout in seconds. The final formula is max(TTL * multiplier + extension, minimum)."));
+		o.rmempty = false;
+		o.datatype = "uinteger";
+		o.default = "120";
+		o.depends("nftset_timeout", "1");
+
 		// rr-ttl;
 		o = s.taboption("advanced", form.Value, "rr_ttl", _("Domain TTL"), _("TTL for all domain result."));
 		o.rempty = true;

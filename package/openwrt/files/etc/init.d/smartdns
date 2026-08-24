@@ -744,6 +744,18 @@ load_service()
 	config_get nftset_no_speed "$section" "nftset_no_speed" ""
 	[ -z "$nftset_no_speed" ] || conf_append "nftset-no-speed" "$nftset_no_speed"
 
+	config_get_bool nftset_timeout "$section" "nftset_timeout" "0"
+	[ "$nftset_timeout" = "1" ] && conf_append "nftset-timeout" "yes"
+
+	config_get nftset_timeout_multiplier "$section" "nftset_timeout_multiplier" "1"
+	[ -z "$nftset_timeout_multiplier" ] || conf_append "nftset-timeout-multiplier" "$nftset_timeout_multiplier"
+
+	config_get nftset_timeout_grace "$section" "nftset_timeout_grace" "60"
+	[ -z "$nftset_timeout_grace" ] || conf_append "nftset-timeout-grace" "$nftset_timeout_grace"
+
+	config_get nftset_timeout_min "$section" "nftset_timeout_min" "120"
+	[ -z "$nftset_timeout_min" ] || conf_append "nftset-timeout-min" "$nftset_timeout_min"
+
 	config_get rr_ttl "$section" "rr_ttl" ""
 	[ -z "$rr_ttl" ] || conf_append "rr-ttl" "$rr_ttl"
 

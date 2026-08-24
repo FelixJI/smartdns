@@ -1,4 +1,8 @@
 config 'smartdns'
 	option 'enabled' '0'
+	option 'nftset_timeout' '0'
+	option 'nftset_timeout_multiplier' '1'
+	option 'nftset_timeout_grace' '60'
+	option 'nftset_timeout_min' '120'
 	
 config 'domain-rule'

@@ -40,27 +40,32 @@ void _dns_server_post_context_init(struct dns_server_post_context *context, stru
 	context->request = request;
 }
 
-static int _dns_server_get_nftset_timeout_value(int reply_ttl, int request_ttl, int config_ttl)
+static int _dns_server_get_nftset_timeout_value(int is_cache_reply, int reply_ttl, int request_ttl, int multiplier,
+											int grace, int min_timeout)
 {
-	int ttl = reply_ttl;
-	if (ttl <= 0) {
-		ttl = request_ttl;
-	}
-	if (ttl <= 0) {
-		ttl = config_ttl;
+	int ttl = is_cache_reply ? reply_ttl : request_ttl;
+	uint64_t timeout_value = 0;
+
+	if (ttl < 0) {
+		ttl = 0;
 	}
 
-	return ttl + 60;
+	timeout_value = (uint64_t)ttl * (uint64_t)multiplier + (uint64_t)grace;
+	if (timeout_value < (uint64_t)min_timeout) {
+		timeout_value = min_timeout;
+	}
+	if (timeout_value > CONF_INT_MAX) {
+		timeout_value = CONF_INT_MAX;
+	}
+
+	return (int)timeout_value;
 }
 
 #ifdef TEST
-int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl, int multiplier,
+int dns_server_get_nftset_timeout_value_for_test(int is_cache_reply, int reply_ttl, int request_ttl, int multiplier,
 											 int grace, int min_timeout)
 {
-	(void)multiplier;
-	(void)grace;
-	(void)min_timeout;
-	return _dns_server_get_nftset_timeout_value(reply_ttl, request_ttl, config_ttl);
+	return _dns_server_get_nftset_timeout_value(is_cache_reply, reply_ttl, request_ttl, multiplier, grace, min_timeout);
 }
 #endif
 
@@ -699,7 +704,10 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 	}
 
 	if (conf->ipset_nftset.nftset_timeout_enable) {
-		nftset_timeout_value = _dns_server_get_nftset_timeout_value(context->reply_ttl, request->ip_ttl, config_ttl);
+		nftset_timeout_value = _dns_server_get_nftset_timeout_value(
+			context->is_cache_reply, context->reply_ttl, request->ip_ttl,
+			conf->ipset_nftset.nftset_timeout_multiplier,
+			conf->ipset_nftset.nftset_timeout_grace, conf->ipset_nftset.nftset_timeout_min);
 	}
 
 	for (j = 1; j < DNS_RRS_OPT; j++) {

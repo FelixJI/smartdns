@@ -106,12 +106,12 @@ TEST(Nftset, ValidCacheHitRefreshesTimedSet)
 
 TEST(Nftset, TimeoutFormulaIsConfigurable)
 {
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(100, 600, 60, 1, 60, 120), 160);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 100, 60, 1, 60, 120), 160);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 0, 60, 1, 60, 120), 120);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(30, 600, 60, 1, 60, 120), 120);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(100, 600, 60, 3, 60, 120), 360);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(100, 600, 60, 0, 30, 0), 30);
-	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(2147483647, 0, 0, 2147483647, 2147483647, 0),
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 3, 600, 1, 60, 120), 660);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(1, 100, 600, 1, 60, 120), 160);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(1, 0, 600, 1, 60, 120), 120);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 30, 30, 1, 60, 120), 120);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 3, 100, 3, 60, 120), 360);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 3, 100, 0, 30, 0), 30);
+	EXPECT_EQ(dns_server_get_nftset_timeout_value_for_test(0, 0, 2147483647, 2147483647, 2147483647, 0),
 			  2147483647);
 }
