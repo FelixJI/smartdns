@@ -46,7 +46,7 @@ int _dns_cache_specify_packet(struct dns_server_post_context *context);
 int _dns_server_expired_cache_ttl(struct dns_cache *cache, int serve_expired_ttl);
 
 #ifdef TEST
-int dns_server_cache_should_update_nftset_for_test(int cache_ttl, int is_visited, int nftset_timeout_enabled);
+int dns_server_cache_should_refresh_timed_nftset_for_test(int nftset_timeout_enabled);
 #endif
 #ifdef __cplusplus
 }

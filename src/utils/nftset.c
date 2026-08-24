@@ -23,12 +23,15 @@
 #include "smartdns/tlog.h"
 
 #include <errno.h>
+#include <endian.h>
+#include <limits.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <memory.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -48,6 +51,11 @@ struct nlmsgreq {
 enum { PAYLOAD_MAX = 2048 };
 
 static int nftset_fd;
+static pthread_mutex_t nftset_operation_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#ifdef TEST
+static nftset_request_callback_t nftset_request_callback;
+#endif
 
 static int _nftset_get_nffamily_from_str(const char *family)
 {
@@ -201,7 +209,7 @@ static int _nftset_socket_init(void)
 	return 0;
 }
 
-static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
+static int _nftset_socket_request_real(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
 {
 	int ret = -1;
 	struct pollfd pfds;
@@ -339,18 +347,39 @@ static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret
 		return -1;
 	}
 
-	return 0;
+	return len;
 }
+
+static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
+{
+#ifdef TEST
+	if (nftset_request_callback != NULL) {
+		return nftset_request_callback(msg, msg_len, ret_msg, ret_msg_len);
+	}
+#endif
+	return _nftset_socket_request_real(msg, msg_len, ret_msg, ret_msg_len);
+}
+
+#ifdef TEST
+void nftset_set_request_callback_for_test(nftset_request_callback_t callback)
+{
+	pthread_mutex_lock(&nftset_operation_lock);
+	nftset_request_callback = callback;
+	pthread_mutex_unlock(&nftset_operation_lock);
+}
+#endif
 
 static int _nftset_socket_send(void *msg, int msg_len)
 {
 	char recvbuff[1024];
+	int ret = 0;
 
 	if (dns_conf.nftset_debug_enable == 0) {
 		return _nftset_socket_request(msg, msg_len, NULL, 0);
 	}
 
-	return _nftset_socket_request(msg, msg_len, recvbuff, sizeof(recvbuff));
+	ret = _nftset_socket_request(msg, msg_len, recvbuff, sizeof(recvbuff));
+	return ret < 0 ? ret : 0;
 }
 
 static int _nftset_get_nftset(int nffamily, const char *table_name, const char *setname, void *buf, void **nextbuf)
@@ -369,8 +398,8 @@ static int _nftset_get_nftset(int nffamily, const char *table_name, const char *
 
 	struct nlmsghdr *n = &req->h;
 
-	_nftset_addattr_string(n, PAYLOAD_MAX, NFTA_SET_ELEM_LIST_SET, setname);
-	_nftset_addattr_string(n, PAYLOAD_MAX, NFTA_SET_ELEM_LIST_TABLE, table_name);
+	_nftset_addattr_string(n, PAYLOAD_MAX, NFTA_SET_NAME, setname);
+	_nftset_addattr_string(n, PAYLOAD_MAX, NFTA_SET_TABLE, table_name);
 
 	if (nextbuf) {
 		*nextbuf = (uint8_t *)buf + req->h.nlmsg_len;
@@ -490,8 +519,13 @@ static int _nftset_add_element(int nffamily, const char *table_name, const char 
 	_nftset_addattr(n, PAYLOAD_MAX, NFTA_DATA_VALUE, data, data_len);
 	_nftset_addattr_nest_end(n, nest_elem_key);
 	if (timeout > 0) {
-		uint64_t timeout_value = htobe64(timeout * 1000);
+		uint64_t timeout_seconds = timeout;
+		if (timeout_seconds > UINT64_MAX / 1000) {
+			timeout_seconds = UINT64_MAX / 1000;
+		}
+		uint64_t timeout_value = htobe64(timeout_seconds * 1000);
 		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_TIMEOUT, &timeout_value, sizeof(timeout_value));
+		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_EXPIRATION, &timeout_value, sizeof(timeout_value));
 	}
 	_nftset_addattr_nest_end(n, nest_elem);
 
@@ -551,9 +585,101 @@ static int _nftset_process_setflags(uint32_t flags, const unsigned char addr[], 
 	return 0;
 }
 
-/* Check whether the IP address already exists in the nftables collection */
-static int _nftset_test_ip_exists(int nffamily, const char *tablename, const char *setname, const unsigned char addr[],
-								  int addr_len)
+struct nftset_element_state {
+	int exists;
+	int has_expiration;
+	uint64_t expiration_ms;
+};
+
+static const struct rtattr *_nftset_find_attr(const void *data, int len, uint16_t type)
+{
+	const struct rtattr *attr = data;
+	while (RTA_OK(attr, len)) {
+		if ((attr->rta_type & NLA_TYPE_MASK) == type) {
+			return attr;
+		}
+		attr = RTA_NEXT(attr, len);
+	}
+
+	return NULL;
+}
+
+static int _nftset_parse_element_reply(const void *reply, int reply_len, struct nftset_element_state *state)
+{
+	const struct nlmsghdr *nlh = reply;
+	int remaining = reply_len;
+
+	if (reply == NULL || reply_len <= 0 || state == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	memset(state, 0, sizeof(*state));
+	while (NLMSG_OK(nlh, remaining)) {
+		if (nlh->nlmsg_type == (NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSETELEM)) {
+			int list_len = NLMSG_PAYLOAD(nlh, sizeof(struct nfgenmsg));
+			const void *list_data = (const uint8_t *)NLMSG_DATA(nlh) + NLMSG_ALIGN(sizeof(struct nfgenmsg));
+			const struct rtattr *elements =
+				_nftset_find_attr(list_data, list_len, NFTA_SET_ELEM_LIST_ELEMENTS);
+			if (elements == NULL) {
+				errno = EPROTO;
+				return -1;
+			}
+
+			int elements_len = RTA_PAYLOAD(elements);
+			const struct rtattr *element = _nftset_find_attr(RTA_DATA(elements), elements_len, NFTA_LIST_ELEM);
+			if (element == NULL) {
+				errno = EPROTO;
+				return -1;
+			}
+
+			int element_len = RTA_PAYLOAD(element);
+			const struct rtattr *expiration =
+				_nftset_find_attr(RTA_DATA(element), element_len, NFTA_SET_ELEM_EXPIRATION);
+			state->exists = 1;
+			if (expiration != NULL) {
+				uint64_t value = 0;
+				if (RTA_PAYLOAD(expiration) != (int)sizeof(value)) {
+					errno = EPROTO;
+					return -1;
+				}
+				memcpy(&value, RTA_DATA(expiration), sizeof(value));
+				state->expiration_ms = be64toh(value);
+				state->has_expiration = 1;
+			}
+
+			return 1;
+		}
+
+		nlh = NLMSG_NEXT(nlh, remaining);
+	}
+
+	errno = EPROTO;
+	return -1;
+}
+
+#ifdef TEST
+int nftset_parse_element_reply_for_test(const void *reply, int reply_len, uint64_t *expiration_ms,
+									int *has_expiration)
+{
+	struct nftset_element_state state;
+	int ret = _nftset_parse_element_reply(reply, reply_len, &state);
+	if (ret > 0) {
+		if (expiration_ms != NULL) {
+			*expiration_ms = state.expiration_ms;
+		}
+		if (has_expiration != NULL) {
+			*has_expiration = state.has_expiration;
+		}
+	}
+
+	return ret;
+}
+#endif
+
+/* Read whether an element exists and, for timed elements, its actual remaining lifetime. */
+static int _nftset_get_element_state(int nffamily, const char *tablename, const char *setname,
+									 const unsigned char addr[], int addr_len, struct nftset_element_state *state)
 {
 	uint8_t buf[PAYLOAD_MAX];
 	uint8_t result[PAYLOAD_MAX];
@@ -602,59 +728,24 @@ static int _nftset_test_ip_exists(int nffamily, const char *tablename, const cha
 
 	/* Send a test message and receive a response */
 	int ret = _nftset_socket_request(buf, buffer_len, result, sizeof(result));
+	if (ret >= 0) {
+		return _nftset_parse_element_reply(result, ret, state);
+	}
 
-	if (ret < 0) {
-		/* errorno=-2 */
-		if (errno == ENOENT) {
-			if (dns_conf.nftset_debug_enable) {
-				tlog(TLOG_DEBUG, "nftset test ip: table/set not found, assuming ip not exists");
-			}
-			return 0;
-		}
-		/* errorno=11 */
-		else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			if (dns_conf.nftset_debug_enable) {
-				tlog(TLOG_DEBUG, "nftset test ip: EAGAIN error, assuming ip exists");
-			}
-			return 1;
-		}
-
+	/* errorno=-2 */
+	if (errno == ENOENT) {
 		if (dns_conf.nftset_debug_enable) {
-			char ip_str[INET6_ADDRSTRLEN];
-			if (addr_len == 4) {
-				inet_ntop(AF_INET, addr, ip_str, sizeof(ip_str));
-			} else if (addr_len == 16) {
-				inet_ntop(AF_INET6, addr, ip_str, sizeof(ip_str));
-			} else {
-				snprintf(ip_str, sizeof(ip_str), "unknown");
-			}
-			tlog(TLOG_DEBUG,
-				 "nftset test ip communication failed, assuming ip not exists: family=%d, table=%s, set=%s, ip=%s, "
-				 "errorno:%d",
-				 nffamily, tablename, setname, ip_str, errno);
+			tlog(TLOG_DEBUG, "nftset test ip: table/set not found, assuming ip not exists");
 		}
+		memset(state, 0, sizeof(*state));
 		return 0;
 	}
-
-	int ip_exists = 0;
-
-	struct nlmsghdr *nlh = (struct nlmsghdr *)result;
-
-	/* If a successful response is received, it indicates that the IP already exists */
-	if (nlh->nlmsg_type == (NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSETELEM)) {
-		ip_exists = 1;
-	}
-
-	/* Received an error message */
-	if (nlh->nlmsg_type == NLMSG_ERROR) {
-		struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
-
-		if (err->error == -ENOENT) {
-			ip_exists = 0;
-		} else if (dns_conf.nftset_debug_enable) {
-			tlog(TLOG_DEBUG, "nftset test ip error: family=%d, table=%s, set=%s, error=%d", nffamily, tablename,
-				 setname, -err->error);
+	/* errorno=11 */
+	if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		if (dns_conf.nftset_debug_enable) {
+			tlog(TLOG_DEBUG, "nftset element query is temporarily unavailable");
 		}
+		return -1;
 	}
 
 	if (dns_conf.nftset_debug_enable) {
@@ -666,11 +757,11 @@ static int _nftset_test_ip_exists(int nffamily, const char *tablename, const cha
 		} else {
 			snprintf(ip_str, sizeof(ip_str), "unknown");
 		}
-		tlog(TLOG_DEBUG, "nftset test ip result: family=%d, table=%s, set=%s, ip=%s, exists=%d", nffamily, tablename,
-			 setname, ip_str, ip_exists);
+		tlog(TLOG_DEBUG,
+			 "nftset element query failed: family=%d, table=%s, set=%s, ip=%s, errorno:%d", nffamily, tablename,
+			 setname, ip_str, errno);
 	}
-
-	return ip_exists;
+	return -1;
 }
 
 static int _nftset_del(int nffamily, const char *tablename, const char *setname, const unsigned char addr[],
@@ -687,8 +778,8 @@ static int _nftset_del(int nffamily, const char *tablename, const char *setname,
 	return _nftset_socket_send(buf, buffer_len);
 }
 
-int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len)
+static int _nftset_del_locked(const char *familyname, const char *tablename, const char *setname,
+							  const unsigned char addr[], int addr_len)
 {
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
 
@@ -718,13 +809,18 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
 	return ret;
 }
 
-int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len, unsigned long timeout)
+static int _nftset_add_locked(const char *familyname, const char *tablename, const char *setname,
+							  const unsigned char addr[], int addr_len, unsigned long timeout)
 {
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
-	int ip_exists = _nftset_test_ip_exists(nffamily, tablename, setname, addr, addr_len);
+	struct nftset_element_state state;
+	int element_ret = _nftset_get_element_state(nffamily, tablename, setname, addr, addr_len, &state);
 
-	if (ip_exists) {
+	if (element_ret < 0) {
+		return -1;
+	}
+
+	if (state.exists) {
 		if (dns_conf.nftset_debug_enable) {
 			char ip_str[INET6_ADDRSTRLEN];
 			if (addr_len == 4) {
@@ -773,10 +869,6 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 		addr_end_len = 0;
 	}
 
-	if (timeout > 0) {
-		_nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-	}
-
 	_nftset_start_batch(next, &next);
 	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
 	_nftset_end_batch(next, &next);
@@ -819,10 +911,115 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 	return ret;
 }
 
+static uint64_t _nftset_timeout_to_ms(unsigned long timeout)
+{
+	uint64_t seconds = timeout;
+	if (seconds > UINT64_MAX / 1000) {
+		seconds = UINT64_MAX / 1000;
+	}
+
+	return seconds * 1000;
+}
+
+static int _nftset_upsert_timed_locked(const char *familyname, const char *tablename, const char *setname,
+									   const unsigned char addr[], int addr_len, unsigned long desired_timeout,
+									   int allow_permanent_fallback)
+{
+	int nffamily = _nftset_get_nffamily_from_str(familyname);
+	uint8_t addr_end_buff[16] = {0};
+	uint8_t *addr_end = addr_end_buff;
+	uint32_t flags = 0;
+	int addr_end_len = 0;
+	struct nftset_element_state state;
+
+	if (nffamily == NFPROTO_UNSPEC || (addr_len != 4 && addr_len != 16) || desired_timeout == 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (_nftset_get_flags(nffamily, tablename, setname, &flags) != 0) {
+		return -1;
+	}
+	if ((flags & NFT_SET_TIMEOUT) == 0) {
+		if (allow_permanent_fallback) {
+			return _nftset_add_locked(familyname, tablename, setname, addr, addr_len, 0);
+		}
+		return 0;
+	}
+
+	unsigned long timeout = desired_timeout;
+	if (_nftset_process_setflags(flags, addr, addr_len, &timeout, &addr_end, &addr_end_len) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int element_ret = _nftset_get_element_state(nffamily, tablename, setname, addr, addr_len, &state);
+	if (element_ret < 0) {
+		return -1;
+	}
+
+	uint64_t desired_ms = _nftset_timeout_to_ms(timeout);
+	if (state.exists) {
+		if (state.has_expiration == 0 || state.expiration_ms >= desired_ms) {
+			return 0;
+		}
+	}
+
+	uint8_t buf[PAYLOAD_MAX];
+	void *next = buf;
+	_nftset_start_batch(next, &next);
+	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
+	_nftset_end_batch(next, &next);
+	int buffer_len = (uint8_t *)next - buf;
+	int ret = _nftset_socket_send(buf, buffer_len);
+	if (ret != 0) {
+		tlog(TLOG_ERROR, "nftset timed upsert failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename,
+			 setname, strerror(errno));
+	}
+
+	return ret;
+}
+
+int nftset_upsert_timed(const char *familyname, const char *tablename, const char *setname,
+						const unsigned char addr[], int addr_len, unsigned long desired_timeout)
+{
+	pthread_mutex_lock(&nftset_operation_lock);
+	int ret =
+		_nftset_upsert_timed_locked(familyname, tablename, setname, addr, addr_len, desired_timeout, 0);
+	pthread_mutex_unlock(&nftset_operation_lock);
+	return ret;
+}
+
+int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
+			   int addr_len, unsigned long timeout)
+{
+	pthread_mutex_lock(&nftset_operation_lock);
+	int ret = timeout > 0
+			  ? _nftset_upsert_timed_locked(familyname, tablename, setname, addr, addr_len, timeout, 1)
+			  : _nftset_add_locked(familyname, tablename, setname, addr, addr_len, 0);
+	pthread_mutex_unlock(&nftset_operation_lock);
+	return ret;
+}
+
+int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
+			   int addr_len)
+{
+	pthread_mutex_lock(&nftset_operation_lock);
+	int ret = _nftset_del_locked(familyname, tablename, setname, addr, addr_len);
+	pthread_mutex_unlock(&nftset_operation_lock);
+	return ret;
+}
+
 #else
 
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len, unsigned long timeout)
+{
+	return 0;
+}
+
+int nftset_upsert_timed(const char *familyname, const char *tablename, const char *setname,
+						const unsigned char addr[], int addr_len, unsigned long desired_timeout)
 {
 	return 0;
 }

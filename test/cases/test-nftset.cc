@@ -19,6 +19,7 @@
 #include "gtest/gtest.h"
 #include "dns_server/cache.h"
 #include "dns_server/context.h"
+#include "dns_server/ipset_nftset.h"
 #include "smartdns/lib/nftset.h"
 
 #include <algorithm>
@@ -330,6 +331,49 @@ TEST_F(NftsetTest, PermanentSetKeepsExistingElementUntouched)
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
+TEST_F(NftsetTest, TimedModeFallsBackToLegacyPermanentSetBehavior)
+{
+	kernel.timeout_set = false;
+	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 300), 0);
+	EXPECT_TRUE(kernel.exists);
+	EXPECT_FALSE(kernel.has_expiration);
+	EXPECT_EQ(kernel.last_timeout_ms, 0U);
+	EXPECT_EQ(kernel.new_element_count, 1);
+
+	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 30), 0);
+	EXPECT_EQ(kernel.new_element_count, 1);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+}
+
+TEST_F(NftsetTest, TimedOnlyCacheRefreshDoesNotWritePermanentSet)
+{
+	kernel.timeout_set = false;
+	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "permanent", ipv4, sizeof(ipv4), 300), 0);
+	EXPECT_FALSE(kernel.exists);
+	EXPECT_EQ(kernel.new_element_count, 0);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+}
+
+TEST_F(NftsetTest, DnsWriteSeamKeepsCacheOnlyAndLegacyPermanentPathsSeparate)
+{
+	struct dns_request request = {};
+	std::strncpy(request.domain, "example.com", sizeof(request.domain) - 1);
+	struct dns_nftset_rule rule = {};
+	rule.familyname = "inet";
+	rule.nfttablename = "filter";
+	rule.nftsetname = "permanent";
+	kernel.timeout_set = false;
+
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 300, 1);
+	EXPECT_FALSE(kernel.exists);
+	EXPECT_EQ(kernel.new_element_count, 0);
+
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 300, 0);
+	EXPECT_TRUE(kernel.exists);
+	EXPECT_FALSE(kernel.has_expiration);
+	EXPECT_EQ(kernel.new_element_count, 1);
+}
+
 TEST_F(NftsetTest, ConcurrentUpdatesKeepLongestLease)
 {
 	std::vector<unsigned long> timeouts = {2, 30, 7, 900, 60, 300, 1, 120};
@@ -365,15 +409,14 @@ TEST(NftsetDnsPath, CacheAndUpstreamUseDifferentEffectiveTtl)
 
 TEST(NftsetDnsPath, ValidVisitedCacheRefreshesOnlyTimedNftset)
 {
-	EXPECT_TRUE(dns_server_cache_should_update_nftset_for_test(100, 1, 1));
-	EXPECT_FALSE(dns_server_cache_should_update_nftset_for_test(100, 1, 0));
-	EXPECT_TRUE(dns_server_cache_should_update_nftset_for_test(0, 1, 0));
-	EXPECT_TRUE(dns_server_cache_should_update_nftset_for_test(100, 0, 0));
+	EXPECT_TRUE(dns_server_cache_should_refresh_timed_nftset_for_test(1));
+	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0));
 }
 
-TEST(NftsetDnsPath, HttpsHintsCanReachPacketWalkerWithoutSelectedIp)
+TEST(NftsetDnsPath, HttpsAndSvcbHintsCanReachPacketWalkerWithoutSelectedIp)
 {
 	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_HTTPS, 0));
+	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_SVCB, 0));
 	EXPECT_FALSE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_A, 0));
 	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_A, 1));
 }
