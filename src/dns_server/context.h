@@ -39,7 +39,8 @@ void _dns_server_post_context_init_from(struct dns_server_post_context *context,
 										struct dns_packet *packet, unsigned char *inpacket, int inpacket_len);
 
 #ifdef TEST
-int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl);
+int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl, int multiplier,
+											 int grace, int min_timeout);
 #endif
 #ifdef __cplusplus
 }

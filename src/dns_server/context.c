@@ -54,8 +54,12 @@ static int _dns_server_get_nftset_timeout_value(int reply_ttl, int request_ttl, 
 }
 
 #ifdef TEST
-int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl)
+int dns_server_get_nftset_timeout_value_for_test(int reply_ttl, int request_ttl, int config_ttl, int multiplier,
+											 int grace, int min_timeout)
 {
+	(void)multiplier;
+	(void)grace;
+	(void)min_timeout;
 	return _dns_server_get_nftset_timeout_value(reply_ttl, request_ttl, config_ttl);
 }
 #endif
