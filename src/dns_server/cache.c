@@ -35,11 +35,24 @@ int _dns_server_expired_cache_ttl(struct dns_cache *cache, int serve_expired_ttl
 	return cache->info.insert_time + cache->info.ttl + serve_expired_ttl - time(NULL);
 }
 
+static int _dns_server_cache_should_refresh_timed_nftset(int nftset_timeout_enabled)
+{
+	return nftset_timeout_enabled != 0;
+}
+
+#ifdef TEST
+int dns_server_cache_should_refresh_timed_nftset_for_test(int nftset_timeout_enabled)
+{
+	return _dns_server_cache_should_refresh_timed_nftset(nftset_timeout_enabled);
+}
+#endif
+
 static int _dns_cache_is_specify_packet(int qtype)
 {
 	switch (qtype) {
 	case DNS_T_PTR:
 	case DNS_T_HTTPS:
+	case DNS_T_SVCB:
 	case DNS_T_TXT:
 	case DNS_T_SRV:
 	case DNS_T_CAA:
@@ -130,7 +143,7 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 	int ttl = 0;
 	int ret = -1;
 
-	if (qtype != DNS_T_A && qtype != DNS_T_AAAA && qtype != DNS_T_HTTPS) {
+	if (qtype != DNS_T_A && qtype != DNS_T_AAAA && qtype != DNS_T_HTTPS && qtype != DNS_T_SVCB) {
 		goto errout;
 	}
 
@@ -298,6 +311,8 @@ static int _dns_server_process_cache_packet(struct dns_request *request, struct 
 	request->rcode = context.packet->head.rcode;
 	context.do_cache = 0;
 	context.do_ipset = do_ipset;
+	context.do_nftset_timeout =
+		_dns_server_cache_should_refresh_timed_nftset(request->conf->ipset_nftset.nftset_timeout_enable);
 	context.do_audit = 1;
 	context.do_reply = 1;
 	context.is_cache_reply = 1;

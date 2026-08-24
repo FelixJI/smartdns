@@ -437,7 +437,8 @@ int _dns_server_process_answer(struct dns_request *request, const char *domain, 
 				is_rcode_set = 1;
 				tlog(TLOG_DEBUG, "name: %s ttl: %d cname: %s\n", domain_name, ttl, cname);
 			} break;
-			case DNS_T_HTTPS: {
+			case DNS_T_HTTPS:
+			case DNS_T_SVCB: {
 				ret = _dns_server_process_answer_HTTPS(rrs, request, domain, cname, result_flag);
 				if (ret == -1) {
 					break;

@@ -29,6 +29,8 @@
 #include "rules.h"
 #include "soa.h"
 
+#include <limits.h>
+
 void _dns_server_post_context_init(struct dns_server_post_context *context, struct dns_request *request)
 {
 	memset(context, 0, sizeof(*context));
@@ -39,6 +41,37 @@ void _dns_server_post_context_init(struct dns_server_post_context *context, stru
 	context->qtype = request->qtype;
 	context->request = request;
 }
+
+static unsigned long _dns_server_get_nftset_timeout(int is_cache_reply, int reply_ttl, int request_ttl)
+{
+	int ttl = is_cache_reply ? reply_ttl : request_ttl;
+	if (ttl <= 0) {
+		return 0;
+	}
+
+	if ((unsigned long)ttl > ULONG_MAX / 3) {
+		return ULONG_MAX;
+	}
+
+	return (unsigned long)ttl * 3;
+}
+
+static int _dns_server_should_walk_ipset_nftset(int qtype, int ip_num)
+{
+	return ip_num > 0 || qtype == DNS_T_HTTPS || qtype == DNS_T_SVCB;
+}
+
+#ifdef TEST
+unsigned long dns_server_get_nftset_timeout_for_test(int is_cache_reply, int reply_ttl, int request_ttl)
+{
+	return _dns_server_get_nftset_timeout(is_cache_reply, reply_ttl, request_ttl);
+}
+
+int dns_server_should_walk_ipset_nftset_for_test(int qtype, int ip_num)
+{
+	return _dns_server_should_walk_ipset_nftset(qtype, ip_num);
+}
+#endif
 
 static void _dns_server_context_add_ip(struct dns_server_post_context *context, const unsigned char *ip_addr)
 {
@@ -277,13 +310,18 @@ static int _dns_add_rrs_HTTPS(struct dns_server_post_context *context)
 	int ret = 0;
 	struct dns_rr_nested param;
 
-	if (request->qtype != DNS_T_HTTPS) {
+	if (request->qtype != DNS_T_HTTPS && request->qtype != DNS_T_SVCB) {
 		return 0;
 	}
 
 	list_for_each_entry(https_svcb, &request->https_svcb_list, list) {
-		ret = dns_add_HTTPS_start(&param, context->packet, DNS_RRS_AN, https_svcb->domain, https_svcb->ttl,
+		if (request->qtype == DNS_T_SVCB) {
+			ret = dns_add_SVCB_start(&param, context->packet, DNS_RRS_AN, https_svcb->domain, https_svcb->ttl,
 								  https_svcb->priority, https_svcb->target);
+		} else {
+			ret = dns_add_HTTPS_start(&param, context->packet, DNS_RRS_AN, https_svcb->domain, https_svcb->ttl,
+								  https_svcb->priority, https_svcb->target);
+		}
 		if (ret != 0) {
 			return ret;
 		}
@@ -570,7 +608,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 	int rr_count = 0;
 	int timeout_value = 0;
 	int ipset_timeout_value = 0;
-	int nftset_timeout_value = 0;
+	unsigned long nftset_timeout_value = 0;
 	int i = 0;
 	int j = 0;
 	struct dns_conf_group *conf;
@@ -588,11 +626,13 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 		return 0;
 	}
 
-	if (context->do_ipset == 0) {
+	int do_ipset = context->do_ipset;
+	int do_nftset = context->do_ipset || context->do_nftset_timeout;
+	if (do_ipset == 0 && do_nftset == 0) {
 		return 0;
 	}
 
-	if (context->ip_num <= 0) {
+	if (_dns_server_should_walk_ipset_nftset(context->qtype, context->ip_num) == 0) {
 		return 0;
 	}
 
@@ -604,40 +644,42 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 
 	/* check ipset rule */
 	rule_flags = _dns_server_get_dns_rule(request, DOMAIN_RULE_FLAGS);
-	if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IGN) == 0) {
-		ipset_rule = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET);
-		if (ipset_rule == NULL) {
-			ipset_rule = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET);
+	if (do_ipset) {
+		if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IGN) == 0) {
+			ipset_rule = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET);
+			if (ipset_rule == NULL) {
+				ipset_rule = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET);
+			}
+
+			if (ipset_rule == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.inet_enable) {
+				ipset_rule_v4 = &conf->ipset_nftset.ipset_no_speed.inet;
+			}
 		}
 
-		if (ipset_rule == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.inet_enable) {
-			ipset_rule_v4 = &conf->ipset_nftset.ipset_no_speed.inet;
+		if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IPV4_IGN) == 0) {
+			ipset_rule_v4 = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET_IPV4);
+			if (ipset_rule_v4 == NULL) {
+				ipset_rule_v4 = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET_IPV4);
+			}
+
+			if (ipset_rule_v4 == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.ipv4_enable) {
+				ipset_rule_v4 = &conf->ipset_nftset.ipset_no_speed.ipv4;
+			}
+		}
+
+		if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IPV6_IGN) == 0) {
+			ipset_rule_v6 = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET_IPV6);
+			if (ipset_rule_v6 == NULL) {
+				ipset_rule_v6 = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET_IPV6);
+			}
+
+			if (ipset_rule_v6 == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.ipv6_enable) {
+				ipset_rule_v6 = &conf->ipset_nftset.ipset_no_speed.ipv6;
+			}
 		}
 	}
 
-	if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IPV4_IGN) == 0) {
-		ipset_rule_v4 = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET_IPV4);
-		if (ipset_rule_v4 == NULL) {
-			ipset_rule_v4 = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET_IPV4);
-		}
-
-		if (ipset_rule_v4 == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.ipv4_enable) {
-			ipset_rule_v4 = &conf->ipset_nftset.ipset_no_speed.ipv4;
-		}
-	}
-
-	if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_IPSET_IPV6_IGN) == 0) {
-		ipset_rule_v6 = _dns_server_get_dns_rule(request, DOMAIN_RULE_IPSET_IPV6);
-		if (ipset_rule_v6 == NULL) {
-			ipset_rule_v6 = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_IPSET_IPV6);
-		}
-
-		if (ipset_rule_v6 == NULL && check_no_speed_rule && conf->ipset_nftset.ipset_no_speed.ipv6_enable) {
-			ipset_rule_v6 = &conf->ipset_nftset.ipset_no_speed.ipv6;
-		}
-	}
-
-	if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_NFTSET_IP_IGN) == 0) {
+	if (do_nftset && (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_NFTSET_IP_IGN) == 0)) {
 		nftset_ip = _dns_server_get_dns_rule(request, DOMAIN_RULE_NFTSET_IP);
 		if (nftset_ip == NULL) {
 			nftset_ip = _dns_server_get_bind_ipset_nftset_rule(request, DOMAIN_RULE_NFTSET_IP);
@@ -648,7 +690,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 		}
 	}
 
-	if (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_NFTSET_IP6_IGN) == 0) {
+	if (do_nftset && (!rule_flags || (rule_flags->flags & DOMAIN_FLAG_NFTSET_IP6_IGN) == 0)) {
 		nftset_ip6 = _dns_server_get_dns_rule(request, DOMAIN_RULE_NFTSET_IP6);
 
 		if (nftset_ip6 == NULL) {
@@ -674,7 +716,12 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 	}
 
 	if (conf->ipset_nftset.nftset_timeout_enable) {
-		nftset_timeout_value = timeout_value;
+		nftset_timeout_value = _dns_server_get_nftset_timeout(context->is_cache_reply, context->reply_ttl,
+												 request->ip_ttl);
+		if (nftset_timeout_value == 0) {
+			nftset_ip = NULL;
+			nftset_ip6 = NULL;
+		}
 	}
 
 	for (j = 1; j < DNS_RRS_OPT; j++) {
@@ -691,7 +738,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 
 				rule = ipset_rule_v4 ? ipset_rule_v4 : ipset_rule;
 				_dns_server_add_ipset_nftset(request, rule, nftset_ip, addr, DNS_RR_A_LEN, ipset_timeout_value,
-											 nftset_timeout_value);
+											 nftset_timeout_value, do_ipset == 0);
 			} break;
 			case DNS_T_AAAA: {
 				unsigned char addr[16];
@@ -703,9 +750,10 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 
 				rule = ipset_rule_v6 ? ipset_rule_v6 : ipset_rule;
 				_dns_server_add_ipset_nftset(request, rule, nftset_ip6, addr, DNS_RR_AAAA_LEN, ipset_timeout_value,
-											 nftset_timeout_value);
+											 nftset_timeout_value, do_ipset == 0);
 			} break;
-			case DNS_T_HTTPS: {
+			case DNS_T_HTTPS:
+			case DNS_T_SVCB: {
 				char target[DNS_MAX_CNAME_LEN] = {0};
 				struct dns_svcparam *p = NULL;
 				int priority = 0;
@@ -725,7 +773,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 							addr = p->value + k * 4;
 							rule = ipset_rule_v4 ? ipset_rule_v4 : ipset_rule;
 							_dns_server_add_ipset_nftset(request, rule, nftset_ip, addr, DNS_RR_A_LEN,
-														 ipset_timeout_value, nftset_timeout_value);
+													 ipset_timeout_value, nftset_timeout_value, do_ipset == 0);
 						}
 					} break;
 					case DNS_HTTPS_T_IPV6HINT: {
@@ -734,7 +782,7 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 							addr = p->value + k * 16;
 							rule = ipset_rule_v6 ? ipset_rule_v6 : ipset_rule;
 							_dns_server_add_ipset_nftset(request, rule, nftset_ip6, addr, DNS_RR_AAAA_LEN,
-														 ipset_timeout_value, nftset_timeout_value);
+													 ipset_timeout_value, nftset_timeout_value, do_ipset == 0);
 						}
 					} break;
 					default:
@@ -772,6 +820,7 @@ static int _dns_result_child_post(struct dns_server_post_context *context)
 		_dns_server_post_context_init(&parent_context, parent_request);
 		parent_context.do_cache = context->do_cache;
 		parent_context.do_ipset = context->do_ipset;
+		parent_context.do_nftset_timeout = context->do_nftset_timeout;
 		parent_context.do_force_soa = context->do_force_soa;
 		parent_context.do_audit = context->do_audit;
 		parent_context.do_reply = context->do_reply;
@@ -1077,7 +1126,8 @@ int _dns_cache_reply_packet(struct dns_server_post_context *context)
 		return _dns_cache_packet(context);
 	}
 
-	if (context->qtype != DNS_T_AAAA && context->qtype != DNS_T_A && context->qtype != DNS_T_HTTPS) {
+	if (context->qtype != DNS_T_AAAA && context->qtype != DNS_T_A && context->qtype != DNS_T_HTTPS &&
+		context->qtype != DNS_T_SVCB) {
 		return _dns_cache_specify_packet(context);
 	}
 

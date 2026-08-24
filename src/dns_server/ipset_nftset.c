@@ -23,7 +23,8 @@
 
 void _dns_server_add_ipset_nftset(struct dns_request *request, struct dns_ipset_rule *ipset_rule,
 								  struct dns_nftset_rule *nftset_rule, const unsigned char addr[], int addr_len,
-								  int ipset_timeout_value, int nftset_timeout_value)
+								  int ipset_timeout_value, unsigned long nftset_timeout_value,
+								  int nftset_timeout_only)
 {
 	for (const struct dns_ipset_rule *cur = ipset_rule; cur; cur = cur->next) {
 		/* add IPV4 to ipset */
@@ -46,8 +47,17 @@ void _dns_server_add_ipset_nftset(struct dns_request *request, struct dns_ipset_
 		if (addr_len == DNS_RR_A_LEN) {
 			tlog(TLOG_DEBUG, "NFTSET-MATCH: domain: %s, nftset: %s %s %s, IP: %d.%d.%d.%d", request->domain,
 				 cur->familyname, cur->nfttablename, cur->nftsetname, addr[0], addr[1], addr[2], addr[3]);
-			nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_A_LEN,
-					   nftset_timeout_value);
+			if (nftset_timeout_value > 0) {
+				if (nftset_timeout_only) {
+					nftset_upsert_timed(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_A_LEN,
+										 nftset_timeout_value);
+				} else {
+					nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_A_LEN,
+							   nftset_timeout_value);
+				}
+			} else {
+				nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_A_LEN, 0);
+			}
 		} else if (addr_len == DNS_RR_AAAA_LEN) {
 			tlog(TLOG_DEBUG,
 				 "NFTSET-MATCH: domain: %s, nftset: %s %s %s, IP: "
@@ -55,8 +65,17 @@ void _dns_server_add_ipset_nftset(struct dns_request *request, struct dns_ipset_
 				 request->domain, cur->familyname, cur->nfttablename, cur->nftsetname, addr[0], addr[1], addr[2],
 				 addr[3], addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11], addr[12],
 				 addr[13], addr[14], addr[15]);
-			nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_AAAA_LEN,
-					   nftset_timeout_value);
+			if (nftset_timeout_value > 0) {
+				if (nftset_timeout_only) {
+					nftset_upsert_timed(cur->familyname, cur->nfttablename, cur->nftsetname, addr,
+										 DNS_RR_AAAA_LEN, nftset_timeout_value);
+				} else {
+					nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_AAAA_LEN,
+							   nftset_timeout_value);
+				}
+			} else {
+				nftset_add(cur->familyname, cur->nfttablename, cur->nftsetname, addr, DNS_RR_AAAA_LEN, 0);
+			}
 		}
 	}
 }
