@@ -492,6 +492,7 @@ static int _nftset_add_element(int nffamily, const char *table_name, const char 
 	if (timeout > 0) {
 		uint64_t timeout_value = htobe64(timeout * 1000);
 		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_TIMEOUT, &timeout_value, sizeof(timeout_value));
+		_nftset_addattr(n, PAYLOAD_MAX, NFTA_SET_ELEM_EXPIRATION, &timeout_value, sizeof(timeout_value));
 	}
 	_nftset_addattr_nest_end(n, nest_elem);
 
@@ -517,8 +518,7 @@ static int _nftset_add_element(int nffamily, const char *table_name, const char 
 
 static int _nftset_should_skip_existing(int ip_exists, unsigned long timeout)
 {
-	(void)timeout;
-	return ip_exists;
+	return ip_exists && timeout == 0;
 }
 
 #ifdef TEST
@@ -797,10 +797,6 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 	} else {
 		addr_end = NULL;
 		addr_end_len = 0;
-	}
-
-	if (timeout > 0) {
-		_nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
 	}
 
 	_nftset_start_batch(next, &next);

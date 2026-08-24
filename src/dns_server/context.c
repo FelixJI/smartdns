@@ -42,13 +42,15 @@ void _dns_server_post_context_init(struct dns_server_post_context *context, stru
 
 static int _dns_server_get_nftset_timeout_value(int reply_ttl, int request_ttl, int config_ttl)
 {
-	(void)reply_ttl;
-	int ttl = request_ttl;
-	if (ttl == 0) {
+	int ttl = reply_ttl;
+	if (ttl <= 0) {
+		ttl = request_ttl;
+	}
+	if (ttl <= 0) {
 		ttl = config_ttl;
 	}
 
-	return ttl * 3;
+	return ttl + 60;
 }
 
 #ifdef TEST

@@ -36,10 +36,9 @@ int _dns_server_expired_cache_ttl(struct dns_cache *cache, int serve_expired_ttl
 }
 
 static int _dns_server_cache_should_update_ipset_nftset(int cache_ttl, int is_visited,
-														 int nftset_timeout_enabled)
+													 int nftset_timeout_enabled)
 {
-	(void)nftset_timeout_enabled;
-	return cache_ttl == 0 || is_visited == 0;
+	return cache_ttl == 0 || is_visited == 0 || nftset_timeout_enabled != 0;
 }
 
 #ifdef TEST
