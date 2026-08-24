@@ -16,9 +16,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "gtest/gtest.h"
 #include "dns_server/cache.h"
 #include "dns_server/context.h"
-#include "gtest/gtest.h"
 #include "smartdns/lib/nftset.h"
 
 #include <arpa/inet.h>
