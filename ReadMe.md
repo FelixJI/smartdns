@@ -14,6 +14,36 @@ SmartDNS 同时支持指定特定域名 IP 地址，并高性匹配，可达到�
 
 SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/smartdns)
 
+## 本分支修改：定时 nftset 租约自愈
+
+启用现有的 `nftset-timeout yes` 后，本分支会按 DNS 结果的有效 TTL（缓存命中时为剩余 TTL）的 3 倍维护定时 nftset 元素：仅在目标剩余时间更长时原子延长，绝不缩短已有租约。有效缓存命中也会补回被外部清理或即将过期的元素，避免 DNS 缓存仍有效而 nftset 已失效。该行为覆盖 A、AAAA，以及 HTTPS/SVCB 记录中的 IPv4/IPv6 hint。
+
+- 未新增配置项；未启用 `nftset-timeout` 时，永久 nftset 与 ipset 的行为保持不变。
+- 上游正式版本和此前本仓库使用的 `smartdns.conf`、OpenWrt `/etc/config/smartdns` 均可直接沿用，无需迁移。
+- 旧实验分支曾提供的 `nftset-timeout-multiplier`、`nftset-timeout-grace`、`nftset-timeout-min` 没有进入本实现；如果配置文件中曾手工加入这些未发布选项，请删除。已有的 `nftset-timeout yes` 继续有效。
+
+### OpenWrt 安装
+
+从 [FelixJI/smartdns nightly Release](https://github.com/FelixJI/smartdns/releases/tag/nightly) 下载与路由器 CPU 架构一致的 `smartdns.*-openwrt-all` 包，以及同一 Release 中的 `luci-app-smartdns` 包，上传到路由器 `/tmp`。升级前建议备份 `/etc/config/smartdns` 和 `/etc/smartdns/`。
+
+使用 `opkg` 的系统安装 `.ipk`：
+
+```shell
+opkg install /tmp/smartdns.*-openwrt-all.ipk /tmp/luci-app-smartdns.*.ipk
+/etc/init.d/smartdns enable
+/etc/init.d/smartdns restart
+```
+
+使用 `apk` 的系统安装 `.apk`：
+
+```shell
+apk add --allow-untrusted /tmp/smartdns.*-openwrt-all.apk /tmp/luci-app-smartdns.*.apk
+/etc/init.d/smartdns enable
+/etc/init.d/smartdns restart
+```
+
+不要同时安装完整 LuCI 包和 `luci-app-smartdns-lite`；需要精简界面时，将上述 LuCI 文件名替换为对应的 `luci-app-smartdns-lite` 包。
+
 ## 软件效果展示
 
 ### 仪表盘
