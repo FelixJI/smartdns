@@ -155,6 +155,7 @@ int BuildElementReply(void *reply, int reply_length, uint64_t expiration_ms, boo
 class FakeNftKernel {
 public:
 	bool timeout_set = true;
+	bool updates_existing_expiration = true;
 	bool exists = false;
 	bool has_expiration = true;
 	uint64_t expiration_ms = 0;
@@ -203,6 +204,7 @@ public:
 private:
 	void ApplyNewElement(const struct nlmsghdr *header)
 	{
+		bool element_existed = exists;
 		new_element_count++;
 		last_flags = header->nlmsg_flags;
 		auto *timeout = FindElementAttribute(header, NFTA_SET_ELEM_TIMEOUT);
@@ -218,9 +220,11 @@ private:
 				last_key_length = RTA_PAYLOAD(value);
 			}
 		}
-		exists = true;
-		has_expiration = expiration != nullptr;
-		expiration_ms = last_expiration_ms != 0 ? last_expiration_ms : last_timeout_ms;
+		if (!element_existed || updates_existing_expiration) {
+			exists = true;
+			has_expiration = expiration != nullptr;
+			expiration_ms = last_expiration_ms != 0 ? last_expiration_ms : last_timeout_ms;
+		}
 	}
 
 	std::mutex mutex_;
@@ -297,6 +301,26 @@ TEST_F(NftsetTest, SharedIpKeepsLatestLeaseRegardlessOfResponseOrder)
 	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 60), 0);
 	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 900), 0);
 	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 30), 0);
+	EXPECT_EQ(kernel.expiration_ms, 900000U);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+}
+
+TEST_F(NftsetTest, LaterLongerUpstreamTtlExtendsLeaseWhenDuplicateUpdateIsIgnored)
+{
+	kernel.updates_existing_expiration = false;
+	struct dns_request request = {};
+	std::strncpy(request.domain, "example.com", sizeof(request.domain) - 1);
+	struct dns_nftset_rule rule = {};
+	rule.familyname = "inet";
+	rule.nfttablename = "filter";
+	rule.nftsetname = "policy4";
+
+	unsigned long first_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 3);
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, first_timeout, 0);
+	ASSERT_EQ(kernel.expiration_ms, 9000U);
+
+	unsigned long later_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 300);
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, later_timeout, 0);
 	EXPECT_EQ(kernel.expiration_ms, 900000U);
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
