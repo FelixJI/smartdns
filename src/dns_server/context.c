@@ -42,6 +42,35 @@ void _dns_server_post_context_init(struct dns_server_post_context *context, stru
 	context->request = request;
 }
 
+static int _dns_request_get_effective_reply_ttl(struct dns_server_post_context *context)
+{
+	int ttl = context->reply_ttl;
+	struct dns_request *request = context->request;
+
+	if (request->conf->dns_rr_ttl_reply_max > 0) {
+		if (request->ip_ttl > request->conf->dns_rr_ttl_reply_max && ttl == 0) {
+			ttl = request->ip_ttl;
+		}
+
+		if (ttl > request->conf->dns_rr_ttl_reply_max) {
+			ttl = request->conf->dns_rr_ttl_reply_max;
+		}
+
+		if (ttl == 0) {
+			ttl = request->conf->dns_rr_ttl_reply_max;
+		}
+	}
+
+	if (ttl == 0) {
+		ttl = request->ip_ttl;
+		if (ttl == 0) {
+			ttl = _dns_server_get_conf_ttl(request, ttl);
+		}
+	}
+
+	return ttl;
+}
+
 static unsigned long _dns_server_get_nftset_timeout(int is_cache_reply, int reply_ttl, int request_ttl)
 {
 	int ttl = is_cache_reply ? reply_ttl : request_ttl;
@@ -65,6 +94,11 @@ static int _dns_server_should_walk_ipset_nftset(int qtype, int ip_num)
 unsigned long dns_server_get_nftset_timeout_for_test(int is_cache_reply, int reply_ttl, int request_ttl)
 {
 	return _dns_server_get_nftset_timeout(is_cache_reply, reply_ttl, request_ttl);
+}
+
+int dns_server_get_effective_reply_ttl_for_test(struct dns_server_post_context *context)
+{
+	return _dns_request_get_effective_reply_ttl(context);
 }
 
 int dns_server_should_walk_ipset_nftset_for_test(int qtype, int ip_num)
@@ -716,8 +750,9 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 	}
 
 	if (conf->ipset_nftset.nftset_timeout_enable) {
-		nftset_timeout_value = _dns_server_get_nftset_timeout(context->is_cache_reply, context->reply_ttl,
-												 request->ip_ttl);
+		int effective_reply_ttl = _dns_request_get_effective_reply_ttl(context);
+		nftset_timeout_value =
+			_dns_server_get_nftset_timeout(context->is_cache_reply, effective_reply_ttl, request->ip_ttl);
 		if (nftset_timeout_value == 0) {
 			nftset_ip = NULL;
 			nftset_ip6 = NULL;
@@ -850,29 +885,8 @@ static int _dns_result_child_post(struct dns_server_post_context *context)
 
 static int _dns_request_update_id_ttl_domain(struct dns_server_post_context *context)
 {
-	int ttl = context->reply_ttl;
+	int ttl = _dns_request_get_effective_reply_ttl(context);
 	struct dns_request *request = context->request;
-
-	if (request->conf->dns_rr_ttl_reply_max > 0) {
-		if (request->ip_ttl > request->conf->dns_rr_ttl_reply_max && ttl == 0) {
-			ttl = request->ip_ttl;
-		}
-
-		if (ttl > request->conf->dns_rr_ttl_reply_max) {
-			ttl = request->conf->dns_rr_ttl_reply_max;
-		}
-
-		if (ttl == 0) {
-			ttl = request->conf->dns_rr_ttl_reply_max;
-		}
-	}
-
-	if (ttl == 0) {
-		ttl = request->ip_ttl;
-		if (ttl == 0) {
-			ttl = _dns_server_get_conf_ttl(request, ttl);
-		}
-	}
 
 	struct dns_update_param param;
 	param.id = request->id;

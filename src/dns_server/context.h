@@ -41,6 +41,8 @@ void _dns_server_post_context_init_from(struct dns_server_post_context *context,
 #ifdef TEST
 unsigned long dns_server_get_nftset_timeout_for_test(int is_cache_reply, int reply_ttl, int request_ttl);
 
+int dns_server_get_effective_reply_ttl_for_test(struct dns_server_post_context *context);
+
 int dns_server_should_walk_ipset_nftset_for_test(int qtype, int ip_num);
 #endif
 #ifdef __cplusplus
