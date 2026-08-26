@@ -20,6 +20,8 @@
 #include "dns_server/cache.h"
 #include "dns_server/context.h"
 #include "dns_server/ipset_nftset.h"
+#include "dns_server/request.h"
+#include "smartdns/dns_cache.h"
 #include "smartdns/lib/nftset.h"
 
 #include <algorithm>
@@ -28,6 +30,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <endian.h>
 #include <errno.h>
 #include <linux/netfilter.h>
@@ -311,7 +314,7 @@ TEST_F(NftsetTest, SharedIpKeepsLatestLeaseRegardlessOfResponseOrder)
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
-TEST_F(NftsetTest, LaterLongerUpstreamTtlExtendsLeaseWhenDuplicateUpdateIsIgnored)
+TEST_F(NftsetTest, LegacyKernelFallbackExtendsLeaseWhenDuplicateUpdateIsIgnored)
 {
 	kernel.updates_existing_expiration = false;
 	struct dns_request request = {};
@@ -409,7 +412,7 @@ TEST_F(NftsetTest, DnsWriteSeamKeepsCacheOnlyAndLegacyPermanentPathsSeparate)
 	EXPECT_EQ(kernel.new_element_count, 1);
 }
 
-TEST_F(NftsetTest, ConcurrentUpdatesKeepLongestLease)
+TEST_F(NftsetTest, ConcurrentSmartdnsUpdatesKeepLongestLease)
 {
 	std::vector<unsigned long> timeouts = {2, 30, 7, 900, 60, 300, 1, 120};
 	std::atomic<bool> start(false);
@@ -448,15 +451,23 @@ TEST(NftsetDnsPath, ExpiredCacheUsesTheSameEffectiveTtlForReplyAndNftset)
 	struct dns_request request = {};
 	request.conf = &conf;
 	request.ip_ttl = 600;
+	struct dns_cache cache = {};
+	cache.info.insert_time = time(NULL) - 10;
+	cache.info.ttl = 1;
 	struct dns_server_post_context context = {};
 	context.request = &request;
-	context.reply_ttl = 0;
 
+	conf.dns_serve_expired_reply_ttl = 3;
+	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
+	EXPECT_EQ(context.reply_ttl, 3);
+	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 3);
+
+	conf.dns_serve_expired_reply_ttl = 0;
+	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
+	EXPECT_EQ(context.reply_ttl, 0);
 	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 600);
 	conf.dns_rr_ttl_reply_max = 5;
 	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 5);
-	context.reply_ttl = 3;
-	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 3);
 }
 
 TEST(NftsetDnsPath, ValidVisitedCacheRefreshesOnlyTimedNftset)

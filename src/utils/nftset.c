@@ -778,6 +778,20 @@ static int _nftset_del(int nffamily, const char *tablename, const char *setname,
 	return _nftset_socket_send(buf, buffer_len);
 }
 
+static int _nftset_send_timed_element(int nffamily, const char *tablename, const char *setname,
+									  const unsigned char addr[], int addr_len, const unsigned char addr_end[],
+									  int addr_end_len, unsigned long timeout)
+{
+	uint8_t buf[PAYLOAD_MAX];
+	void *next = buf;
+
+	_nftset_start_batch(next, &next);
+	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
+	_nftset_end_batch(next, &next);
+
+	return _nftset_socket_send(buf, (uint8_t *)next - buf);
+}
+
 /* Older kernels cannot update an existing element's expiration in place. Keep
  * the delete and add in one nftables batch so readers only see the old or new
  * generation, never an intermediate missing element. */
@@ -991,13 +1005,8 @@ static int _nftset_upsert_timed_locked(const char *familyname, const char *table
 		}
 	}
 
-	uint8_t buf[PAYLOAD_MAX];
-	void *next = buf;
-	_nftset_start_batch(next, &next);
-	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
-	_nftset_end_batch(next, &next);
-	int buffer_len = (uint8_t *)next - buf;
-	int ret = _nftset_socket_send(buf, buffer_len);
+	int ret = _nftset_send_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
+									 timeout);
 	if (ret != 0) {
 		tlog(TLOG_ERROR, "nftset timed upsert failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename,
 			 setname, strerror(errno));
@@ -1028,11 +1037,8 @@ static int _nftset_upsert_timed_locked(const char *familyname, const char *table
 		ret = _nftset_replace_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
 										 timeout);
 	} else {
-		next = buf;
-		_nftset_start_batch(next, &next);
-		_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
-		_nftset_end_batch(next, &next);
-		ret = _nftset_socket_send(buf, (uint8_t *)next - buf);
+		ret = _nftset_send_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
+										 timeout);
 	}
 	if (ret != 0) {
 		return ret;

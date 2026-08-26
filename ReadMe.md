@@ -16,9 +16,10 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 
 ## 本分支修改：定时 nftset 租约自愈
 
-启用现有的 `nftset-timeout yes` 后，本分支会按 DNS 结果的有效 TTL（缓存命中时为剩余 TTL）的 3 倍维护定时 nftset 元素：仅在目标剩余时间更长时原子延长，绝不缩短已有租约。有效缓存命中也会补回被外部清理或即将过期的元素，避免 DNS 缓存仍有效而 nftset 已失效。该行为覆盖 A、AAAA，以及 HTTPS/SVCB 记录中的 IPv4/IPv6 hint。
+启用现有的 `nftset-timeout yes` 后，本分支会按 DNS 结果的有效 TTL（缓存命中时为剩余 TTL）的 3 倍维护定时 nftset 元素：SmartDNS 自身的并发更新只会延长已有租约，不会缩短。有效缓存命中也会补回被外部清理或即将过期的元素，避免 DNS 缓存仍有效而 nftset 已失效。该行为覆盖 A、AAAA，以及 HTTPS/SVCB 记录中的 IPv4/IPv6 hint。
 
 - 未新增配置项；未启用 `nftset-timeout` 时，永久 nftset 与 ipset 的行为保持不变。
+- Linux 6.12 及支持该能力的回移内核会原地更新时间；若内核静默忽略该更新，SmartDNS 会在一个原子 nftables batch 中替换元素。进程外工具同时改写同一元素不受 SmartDNS 的进程内锁协调。
 - 上游正式版本和此前本仓库使用的 `smartdns.conf`、OpenWrt `/etc/config/smartdns` 均可直接沿用，无需迁移。
 - 旧实验分支曾提供的 `nftset-timeout-multiplier`、`nftset-timeout-grace`、`nftset-timeout-min` 没有进入本实现；如果配置文件中曾手工加入这些未发布选项，请删除。已有的 `nftset-timeout yes` 继续有效。
 
