@@ -20,6 +20,8 @@
 #include "dns_server/cache.h"
 #include "dns_server/context.h"
 #include "dns_server/ipset_nftset.h"
+#include "dns_server/request.h"
+#include "smartdns/dns_cache.h"
 #include "smartdns/lib/nftset.h"
 
 #include <algorithm>
@@ -28,6 +30,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <endian.h>
 #include <errno.h>
 #include <linux/netfilter.h>
@@ -155,6 +158,7 @@ int BuildElementReply(void *reply, int reply_length, uint64_t expiration_ms, boo
 class FakeNftKernel {
 public:
 	bool timeout_set = true;
+	bool updates_existing_expiration = true;
 	bool exists = false;
 	bool has_expiration = true;
 	uint64_t expiration_ms = 0;
@@ -166,10 +170,14 @@ public:
 	int get_element_count = 0;
 	int new_element_count = 0;
 	int delete_element_count = 0;
+	int request_count = 0;
+	int last_new_element_request = 0;
+	int last_delete_element_request = 0;
 
 	int Request(const void *request_data, int request_length, void *reply, int reply_length)
 	{
 		std::lock_guard<std::mutex> guard(mutex_);
+		int request_id = ++request_count;
 		int remaining = request_length;
 		auto *header = static_cast<const struct nlmsghdr *>(request_data);
 		while (NLMSG_OK(header, remaining)) {
@@ -187,10 +195,11 @@ public:
 				return BuildElementReply(reply, reply_length, expiration_ms, has_expiration);
 			case NFT_MSG_DELSETELEM:
 				delete_element_count++;
+				last_delete_element_request = request_id;
 				exists = false;
 				break;
 			case NFT_MSG_NEWSETELEM:
-				ApplyNewElement(header);
+				ApplyNewElement(header, request_id);
 				break;
 			default:
 				break;
@@ -201,9 +210,11 @@ public:
 	}
 
 private:
-	void ApplyNewElement(const struct nlmsghdr *header)
+	void ApplyNewElement(const struct nlmsghdr *header, int request_id)
 	{
+		bool element_existed = exists;
 		new_element_count++;
+		last_new_element_request = request_id;
 		last_flags = header->nlmsg_flags;
 		auto *timeout = FindElementAttribute(header, NFTA_SET_ELEM_TIMEOUT);
 		auto *expiration = FindElementAttribute(header, NFTA_SET_ELEM_EXPIRATION);
@@ -218,9 +229,11 @@ private:
 				last_key_length = RTA_PAYLOAD(value);
 			}
 		}
-		exists = true;
-		has_expiration = expiration != nullptr;
-		expiration_ms = last_expiration_ms != 0 ? last_expiration_ms : last_timeout_ms;
+		if (!element_existed || updates_existing_expiration) {
+			exists = true;
+			has_expiration = expiration != nullptr;
+			expiration_ms = last_expiration_ms != 0 ? last_expiration_ms : last_timeout_ms;
+		}
 	}
 
 	std::mutex mutex_;
@@ -301,6 +314,31 @@ TEST_F(NftsetTest, SharedIpKeepsLatestLeaseRegardlessOfResponseOrder)
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
+TEST_F(NftsetTest, LegacyKernelFallbackExtendsLeaseWhenDuplicateUpdateIsIgnored)
+{
+	kernel.updates_existing_expiration = false;
+	struct dns_request request = {};
+	std::strncpy(request.domain, "example.com", sizeof(request.domain) - 1);
+	struct dns_nftset_rule rule = {};
+	rule.familyname = "inet";
+	rule.nfttablename = "filter";
+	rule.nftsetname = "policy4";
+
+	unsigned long first_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 3);
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, first_timeout, 0);
+	ASSERT_EQ(kernel.expiration_ms, 9000U);
+
+	unsigned long later_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 300);
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, later_timeout, 0);
+	EXPECT_EQ(kernel.expiration_ms, 900000U);
+	EXPECT_EQ(kernel.delete_element_count, 1);
+	EXPECT_EQ(kernel.last_delete_element_request, kernel.last_new_element_request);
+
+	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 30, 0);
+	EXPECT_EQ(kernel.expiration_ms, 900000U);
+	EXPECT_EQ(kernel.delete_element_count, 1);
+}
+
 TEST_F(NftsetTest, DescendingCacheTtlDoesNotMoveAbsoluteExpiryForward)
 {
 	for (unsigned long timeout : {900UL, 600UL, 300UL, 30UL}) {
@@ -374,7 +412,7 @@ TEST_F(NftsetTest, DnsWriteSeamKeepsCacheOnlyAndLegacyPermanentPathsSeparate)
 	EXPECT_EQ(kernel.new_element_count, 1);
 }
 
-TEST_F(NftsetTest, ConcurrentUpdatesKeepLongestLease)
+TEST_F(NftsetTest, ConcurrentSmartdnsUpdatesKeepLongestLease)
 {
 	std::vector<unsigned long> timeouts = {2, 30, 7, 900, 60, 300, 1, 120};
 	std::atomic<bool> start(false);
@@ -395,8 +433,10 @@ TEST_F(NftsetTest, ConcurrentUpdatesKeepLongestLease)
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
-TEST(NftsetDnsPath, CacheAndUpstreamUseDifferentEffectiveTtl)
+TEST(NftsetDnsPath, FreshReplyKeepsPolicyLeaseForAuthoritativeTtl)
 {
+	/* The client sees the temporary reply TTL (3), while the policy set keeps the
+	 * address routable for the upstream/configured RR TTL (600 in this example). */
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(0, 3, 600), 1800UL);
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 100, 600), 300UL);
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 0, 600), 0UL);
@@ -405,6 +445,31 @@ TEST(NftsetDnsPath, CacheAndUpstreamUseDifferentEffectiveTtl)
 	uint64_t expected = std::min<uint64_t>(static_cast<uint64_t>(ULONG_MAX),
 										 static_cast<uint64_t>(INT_MAX) * 3U);
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(0, 0, INT_MAX), static_cast<unsigned long>(expected));
+}
+
+TEST(NftsetDnsPath, ExpiredCacheUsesTheSameEffectiveTtlForReplyAndNftset)
+{
+	struct dns_conf_group conf = {};
+	struct dns_request request = {};
+	request.conf = &conf;
+	request.ip_ttl = 600;
+	struct dns_cache cache = {};
+	cache.info.insert_time = time(NULL) - 10;
+	cache.info.ttl = 1;
+	struct dns_server_post_context context = {};
+	context.request = &request;
+
+	conf.dns_serve_expired_reply_ttl = 3;
+	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
+	EXPECT_EQ(context.reply_ttl, 3);
+	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 3);
+
+	conf.dns_serve_expired_reply_ttl = 0;
+	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
+	EXPECT_EQ(context.reply_ttl, 0);
+	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 600);
+	conf.dns_rr_ttl_reply_max = 5;
+	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 5);
 }
 
 TEST(NftsetDnsPath, ValidVisitedCacheRefreshesOnlyTimedNftset)

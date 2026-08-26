@@ -28,6 +28,8 @@ extern "C" {
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len, unsigned long timeout);
 
+/* Serializes SmartDNS writers. External nftables writers are outside the
+ * extend-only ordering guarantee. */
 int nftset_upsert_timed(const char *familyname, const char *tablename, const char *setname,
 						const unsigned char addr[], int addr_len, unsigned long desired_timeout);
 

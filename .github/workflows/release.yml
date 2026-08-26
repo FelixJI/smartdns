@@ -27,20 +27,21 @@ jobs:
         id: decision
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # Fetch the nightly tag from origin
-            git fetch origin refs/tags/nightly:refs/tags/nightly || true
-            if git rev-parse refs/tags/nightly >/dev/null 2>&1; then
-              NIGHTLY_SHA=$(git rev-parse refs/tags/nightly)
+            # Compare HEAD with the newest immutable nightly release tag.
+            git fetch origin 'refs/tags/nightly-*:refs/tags/nightly-*' || true
+            LATEST_NIGHTLY_TAG=$(git tag --list 'nightly-*' --sort=-creatordate | head -n 1)
+            if [ -n "$LATEST_NIGHTLY_TAG" ]; then
+              NIGHTLY_SHA=$(git rev-parse "$LATEST_NIGHTLY_TAG")
               CURRENT_SHA=$(git rev-parse HEAD)
               if [ "$NIGHTLY_SHA" = "$CURRENT_SHA" ]; then
-                echo "Current commit ($CURRENT_SHA) is the same as the existing nightly tag. Skipping scheduled build."
+                echo "Current commit ($CURRENT_SHA) is the same as $LATEST_NIGHTLY_TAG. Skipping scheduled build."
                 echo "should_run=false" >> $GITHUB_OUTPUT
               else
-                echo "New commits detected since the last nightly tag. Running scheduled build."
+                echo "New commits detected since $LATEST_NIGHTLY_TAG. Running scheduled build."
                 echo "should_run=true" >> $GITHUB_OUTPUT
               fi
             else
-              echo "No existing nightly tag found. Running build."
+              echo "No immutable nightly release tag found. Running build."
               echo "should_run=true" >> $GITHUB_OUTPUT
             fi
           else
@@ -235,9 +236,13 @@ jobs:
 
       # 9. Run the build script
       - name: Build All Targets
+        id: build_artifacts
         run: |
           # 1. Determine release version
           export RELEASE_VERSION="$(date +"1.%Y.%m.%d-%H%M")"
+          RELEASE_TAG="nightly-$(date -u +"%Y%m%d-%H%M%S")-${GITHUB_SHA::7}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           
           echo "Building Version: ${RELEASE_VERSION}"
           
@@ -392,31 +397,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 11. Clean up Nightly Release to prevent stale files
-      - name: Clean up Nightly Release
-        if: github.event_name != 'release'
-        run: |
-          gh release delete nightly --cleanup-tag --yes || true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 12. Upload all packages and binaries individually to the GitHub Nightly Release (on non-release events like schedule/workflow_dispatch)
-      - name: Upload Nightly Release Assets
+      # 11. Create a new immutable Nightly Release for every non-release build.
+      - name: Create Nightly Release
         uses: softprops/action-gh-release@v3
         if: github.event_name != 'release'
         with:
-          tag_name: nightly
-          name: "SmartDNS Nightly Build"
+          tag_name: ${{ steps.build_artifacts.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: "SmartDNS Nightly Build ${{ steps.build_artifacts.outputs.release_version }}"
           body: |
-            This release contains the latest automated Nightly build of SmartDNS.
+            This is an immutable automated Nightly build of SmartDNS.
 
             - **Commit**: ${{ github.sha }}
             - **Branch**: `${{ github.ref_name }}`
             - **Build Time**: ${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+            - **Workflow Run**: `${{ github.run_id }}` (attempt `${{ github.run_attempt }}`)
 
-            These packages are automatically compiled and updated on every nightly build / manual run.
+            Each scheduled or manual run creates a separate prerelease so previous build artifacts remain available.
           prerelease: true
           files: release-assets/*
-          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

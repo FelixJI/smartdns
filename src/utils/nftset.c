@@ -778,6 +778,39 @@ static int _nftset_del(int nffamily, const char *tablename, const char *setname,
 	return _nftset_socket_send(buf, buffer_len);
 }
 
+static int _nftset_send_timed_element(int nffamily, const char *tablename, const char *setname,
+									  const unsigned char addr[], int addr_len, const unsigned char addr_end[],
+									  int addr_end_len, unsigned long timeout)
+{
+	uint8_t buf[PAYLOAD_MAX];
+	void *next = buf;
+
+	_nftset_start_batch(next, &next);
+	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
+	_nftset_end_batch(next, &next);
+
+	return _nftset_socket_send(buf, (uint8_t *)next - buf);
+}
+
+/* Older kernels cannot update an existing element's expiration in place. Keep
+ * the delete and add in one nftables batch so readers only see the old or new
+ * generation, never an intermediate missing element. */
+static int _nftset_replace_timed_element(int nffamily, const char *tablename, const char *setname,
+										 const unsigned char addr[], int addr_len,
+										 const unsigned char addr_end[], int addr_end_len,
+										 unsigned long timeout)
+{
+	uint8_t buf[PAYLOAD_MAX * 2];
+	void *next = buf;
+
+	_nftset_start_batch(next, &next);
+	_nftset_del_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, next, &next);
+	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
+	_nftset_end_batch(next, &next);
+
+	return _nftset_socket_send(buf, (uint8_t *)next - buf);
+}
+
 static int _nftset_del_locked(const char *familyname, const char *tablename, const char *setname,
 							  const unsigned char addr[], int addr_len)
 {
@@ -921,6 +954,13 @@ static uint64_t _nftset_timeout_to_ms(unsigned long timeout)
 	return seconds * 1000;
 }
 
+static int _nftset_expiration_reaches_desired(uint64_t expiration_ms, uint64_t desired_ms)
+{
+	/* DNS TTLs have one-second precision. Allow the local Netlink round trip to
+	 * consume at most that unit before deciding an in-place update was ignored. */
+	return expiration_ms >= desired_ms || desired_ms - expiration_ms < 1000;
+}
+
 static int _nftset_upsert_timed_locked(const char *familyname, const char *tablename, const char *setname,
 									   const unsigned char addr[], int addr_len, unsigned long desired_timeout,
 									   int allow_permanent_fallback)
@@ -960,24 +1000,60 @@ static int _nftset_upsert_timed_locked(const char *familyname, const char *table
 
 	uint64_t desired_ms = _nftset_timeout_to_ms(timeout);
 	if (state.exists) {
-		if (state.has_expiration == 0 || state.expiration_ms >= desired_ms) {
+		if (state.has_expiration == 0 || _nftset_expiration_reaches_desired(state.expiration_ms, desired_ms)) {
 			return 0;
 		}
 	}
 
-	uint8_t buf[PAYLOAD_MAX];
-	void *next = buf;
-	_nftset_start_batch(next, &next);
-	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
-	_nftset_end_batch(next, &next);
-	int buffer_len = (uint8_t *)next - buf;
-	int ret = _nftset_socket_send(buf, buffer_len);
+	int ret = _nftset_send_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
+									 timeout);
 	if (ret != 0) {
 		tlog(TLOG_ERROR, "nftset timed upsert failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename,
 			 setname, strerror(errno));
+		return ret;
 	}
 
-	return ret;
+	if (state.exists == 0) {
+		return 0;
+	}
+
+	struct nftset_element_state updated_state;
+	int updated_ret = _nftset_get_element_state(nffamily, tablename, setname, addr, addr_len, &updated_state);
+	if (updated_ret < 0) {
+		return -1;
+	}
+	if (updated_state.exists && updated_state.has_expiration &&
+		_nftset_expiration_reaches_desired(updated_state.expiration_ms, desired_ms)) {
+		return 0;
+	}
+
+	if (updated_state.exists) {
+		if (dns_conf.nftset_debug_enable) {
+			tlog(TLOG_DEBUG,
+				 "nftset in-place expiration update was ignored, using an atomic batch replacement: family:%s, "
+				 "table:%s, set:%s",
+				 familyname, tablename, setname);
+		}
+		ret = _nftset_replace_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
+										 timeout);
+	} else {
+		ret = _nftset_send_timed_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len,
+										 timeout);
+	}
+	if (ret != 0) {
+		return ret;
+	}
+
+	updated_ret = _nftset_get_element_state(nffamily, tablename, setname, addr, addr_len, &updated_state);
+	if (updated_ret <= 0 || updated_state.has_expiration == 0 ||
+		!_nftset_expiration_reaches_desired(updated_state.expiration_ms, desired_ms)) {
+		errno = EIO;
+		tlog(TLOG_ERROR, "nftset timed upsert verification failed, family:%s, table:%s, set:%s", familyname,
+			 tablename, setname);
+		return -1;
+	}
+
+	return 0;
 }
 
 int nftset_upsert_timed(const char *familyname, const char *tablename, const char *setname,
