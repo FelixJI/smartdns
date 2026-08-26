@@ -433,8 +433,10 @@ TEST_F(NftsetTest, ConcurrentSmartdnsUpdatesKeepLongestLease)
 	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
-TEST(NftsetDnsPath, CacheAndUpstreamUseDifferentEffectiveTtl)
+TEST(NftsetDnsPath, FreshReplyKeepsPolicyLeaseForAuthoritativeTtl)
 {
+	/* The client sees the temporary reply TTL (3), while the policy set keeps the
+	 * address routable for the upstream/configured RR TTL (600 in this example). */
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(0, 3, 600), 1800UL);
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 100, 600), 300UL);
 	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 0, 600), 0UL);
