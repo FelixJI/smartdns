@@ -34,16 +34,37 @@ download()
 {
 	url="$1"
 	destination="$2"
+	downloader_found=0
+
+	if command -v wget >/dev/null 2>&1; then
+		downloader_found=1
+		rm -f "$destination"
+		if wget -O "$destination" "$url"; then
+			return 0
+		fi
+		printf '警告：wget 下载失败，正在尝试其他下载器。\n' >&2
+	fi
+
+	if command -v curl >/dev/null 2>&1; then
+		downloader_found=1
+		rm -f "$destination"
+		if curl -fL -o "$destination" "$url"; then
+			return 0
+		fi
+		printf '警告：curl 下载失败，正在尝试其他下载器。\n' >&2
+	fi
 
 	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$destination" "$url"
-	elif command -v wget >/dev/null 2>&1; then
-		wget -q -O "$destination" "$url"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL -o "$destination" "$url"
-	else
-		die "未找到 uclient-fetch、wget 或 curl，无法下载文件。"
+		downloader_found=1
+		rm -f "$destination"
+		if uclient-fetch -O "$destination" "$url"; then
+			return 0
+		fi
+		printf '警告：uclient-fetch 下载失败。\n' >&2
 	fi
+
+	[ "$downloader_found" -eq 1 ] || die "未找到 wget、curl 或 uclient-fetch，无法下载文件。"
+	return 1
 }
 
 choose_source()
@@ -248,4 +269,6 @@ main()
 	[ -n "$BACKUP_FILE" ] && say "配置备份：$BACKUP_FILE"
 }
 
-main "$@"
+if [ "${SMARTDNS_UPGRADE_SOURCE_ONLY:-0}" != "1" ]; then
+	main "$@"
+fi
