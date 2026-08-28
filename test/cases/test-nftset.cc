@@ -472,10 +472,12 @@ TEST(NftsetDnsPath, ExpiredCacheUsesTheSameEffectiveTtlForReplyAndNftset)
 	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 5);
 }
 
-TEST(NftsetDnsPath, ValidVisitedCacheRefreshesOnlyTimedNftset)
+TEST(NftsetDnsPath, CacheRefreshesTimedNftsetOnlyWhenNormalSetRefreshIsRequired)
 {
-	EXPECT_TRUE(dns_server_cache_should_refresh_timed_nftset_for_test(1));
-	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0));
+	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0, 0));
+	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0, 1));
+	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(1, 0));
+	EXPECT_TRUE(dns_server_cache_should_refresh_timed_nftset_for_test(1, 1));
 }
 
 TEST(NftsetDnsPath, HttpsAndSvcbHintsCanReachPacketWalkerWithoutSelectedIp)
