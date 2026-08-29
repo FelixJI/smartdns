@@ -14,47 +14,6 @@ SmartDNS 同时支持指定特定域名 IP 地址，并高性匹配，可达到�
 
 SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/smartdns)
 
-## OpenWrt 安装
-
-#### 一键升级
-
-以 `root` 登录 OpenWrt SSH 后，直接复制粘贴下面整行命令：
-
-```shell
-sh -c 'u=/tmp/smartdns-upgrade.sh; wget -qO "$u" https://raw.githubusercontent.com/FelixJI/smartdns/master/package/openwrt/upgrade.sh && sh "$u"; r=$?; rm -f "$u"; exit $r'
-```
-
-脚本运行后会首先询问升级源：
-
-1. **官方版本**：更新到 `pymumu/smartdns` 的 latest 正式 Release。
-2. **fork 修改版**：更新到 `FelixJI/smartdns` 最新发布的构建（包括最新 nightly）。
-
-脚本仅支持 OpenWrt，会自动识别 `opkg`/apk、CPU 架构并下载匹配的核心包；如果已经安装 `luci-app-smartdns` 或 `luci-app-smartdns-lite`，会保持原有界面类型并同步升级，不会同时安装两种 LuCI 包。安装前会把 `/etc/config/smartdns` 和 `/etc/smartdns/` 备份到 `/tmp`。升级成功后，终端会明确显示本次选择的来源、实际版本号和 Release 标签。
-
-> 从 fork 修改版切回官方版时，版本号可能回退；脚本已允许这种按所选源切换的降级安装。若升级失败，请保留终端错误信息和脚本显示的配置备份路径。
-
-#### 手工安装
-
-从所选仓库的 [官方 Releases](https://github.com/pymumu/smartdns/releases) 或 [fork Releases](https://github.com/FelixJI/smartdns/releases) 下载与路由器 CPU 架构一致的 `smartdns.*-openwrt-all` 包，以及同一 Release 中的 `luci-app-smartdns` 包，上传到路由器 `/tmp`。升级前建议备份 `/etc/config/smartdns` 和 `/etc/smartdns/`。
-
-使用 `opkg` 的系统安装 `.ipk`：
-
-```shell
-opkg install /tmp/smartdns.*-openwrt-all.ipk /tmp/luci-app-smartdns.*.ipk
-/etc/init.d/smartdns enable
-/etc/init.d/smartdns restart
-```
-
-使用 `apk` 的系统安装 `.apk`：
-
-```shell
-apk add --allow-untrusted /tmp/smartdns.*-openwrt-all.apk /tmp/luci-app-smartdns.*.apk
-/etc/init.d/smartdns enable
-/etc/init.d/smartdns restart
-```
-
-不要同时安装完整 LuCI 包和 `luci-app-smartdns-lite`；需要精简界面时，将上述 LuCI 文件名替换为对应的 `luci-app-smartdns-lite` 包。
-
 ## 软件效果展示
 
 ### 仪表盘
