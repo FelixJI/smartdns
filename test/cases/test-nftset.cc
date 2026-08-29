@@ -227,6 +227,16 @@ TEST_F(NftsetTest, ExistingTimedElementIsDeletedAndAddedAgain)
 	EXPECT_EQ(kernel.last_timeout_ms, 300000U);
 }
 
+TEST_F(NftsetTest, ExistingPermanentElementSkipsSetMetadataQueryWhenTimeoutIsDisabled)
+{
+	kernel.exists = true;
+	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 0), 0);
+	EXPECT_EQ(kernel.get_element_count, 1);
+	EXPECT_EQ(kernel.get_set_count, 0);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+	EXPECT_EQ(kernel.new_element_count, 0);
+}
+
 TEST_F(NftsetTest, ExistingPermanentElementRemainsUntouched)
 {
 	kernel.timeout_set = false;

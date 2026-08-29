@@ -749,10 +749,35 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
 	return ret;
 }
 
+static void _nftset_log_existing_ip(int nffamily, const char *tablename, const char *setname,
+									const unsigned char addr[], int addr_len)
+{
+	if (dns_conf.nftset_debug_enable == 0) {
+		return;
+	}
+
+	char ip_str[INET6_ADDRSTRLEN];
+	if (addr_len == 4) {
+		inet_ntop(AF_INET, addr, ip_str, sizeof(ip_str));
+	} else if (addr_len == 16) {
+		inet_ntop(AF_INET6, addr, ip_str, sizeof(ip_str));
+	} else {
+		snprintf(ip_str, sizeof(ip_str), "unknown");
+	}
+	tlog(TLOG_DEBUG, "nftset skip adding existing ip: family=%d, table=%s, set=%s, ip=%s", nffamily, tablename,
+		 setname, ip_str);
+}
+
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len, unsigned long timeout)
 {
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
+	int ip_exists = _nftset_test_ip_exists(nffamily, tablename, setname, addr, addr_len);
+	if (ip_exists && timeout == 0) {
+		_nftset_log_existing_ip(nffamily, tablename, setname, addr, addr_len);
+		return 0;
+	}
+
 	uint8_t addr_end_buff[16] = {0};
 	uint8_t *addr_end = addr_end_buff;
 	uint32_t flags = 0;
@@ -783,20 +808,8 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
 		addr_end_len = 0;
 	}
 
-	int ip_exists = _nftset_test_ip_exists(nffamily, tablename, setname, addr, addr_len);
 	if (ip_exists && timeout == 0) {
-		if (dns_conf.nftset_debug_enable) {
-			char ip_str[INET6_ADDRSTRLEN];
-			if (addr_len == 4) {
-				inet_ntop(AF_INET, addr, ip_str, sizeof(ip_str));
-			} else if (addr_len == 16) {
-				inet_ntop(AF_INET6, addr, ip_str, sizeof(ip_str));
-			} else {
-				snprintf(ip_str, sizeof(ip_str), "unknown");
-			}
-			tlog(TLOG_DEBUG, "nftset skip adding existing ip: family=%d, table=%s, set=%s, ip=%s", nffamily, tablename,
-				 setname, ip_str);
-		}
+		_nftset_log_existing_ip(nffamily, tablename, setname, addr, addr_len);
 		return 0;
 	}
 
