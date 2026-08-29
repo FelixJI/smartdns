@@ -19,8 +19,6 @@
 #ifndef _NFTSET_H
 #define _NFTSET_H
 
-#include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,22 +26,8 @@ extern "C" {
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len, unsigned long timeout);
 
-/* Serializes SmartDNS writers. External nftables writers are outside the
- * extend-only ordering guarantee. */
-int nftset_upsert_timed(const char *familyname, const char *tablename, const char *setname,
-						const unsigned char addr[], int addr_len, unsigned long desired_timeout);
-
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len);
-
-#ifdef TEST
-typedef int (*nftset_request_callback_t)(const void *request, int request_len, void *reply, int reply_len);
-
-void nftset_set_request_callback_for_test(nftset_request_callback_t callback);
-
-int nftset_parse_element_reply_for_test(const void *reply, int reply_len, uint64_t *expiration_ms,
-									int *has_expiration);
-#endif
 
 #ifdef __cplusplus
 }

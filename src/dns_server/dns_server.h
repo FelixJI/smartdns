@@ -163,7 +163,6 @@ struct dns_server_post_context {
 	int do_cache;
 	int do_reply;
 	int do_ipset;
-	int do_nftset_timeout;
 	int do_log_result;
 	int reply_ttl;
 	int cache_ttl;

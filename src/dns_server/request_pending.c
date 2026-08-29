@@ -127,7 +127,6 @@ int _dns_server_reply_all_pending_list(struct dns_request *request, struct dns_s
 		context_pending.do_reply = context->do_reply;
 		context_pending.do_force_soa = context->do_force_soa;
 		context_pending.do_ipset = 0;
-		context_pending.do_nftset_timeout = 0;
 		context_pending.reply_ttl = request->ip_ttl;
 		context_pending.no_release_parent = 0;
 

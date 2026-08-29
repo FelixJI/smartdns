@@ -14,16 +14,7 @@ SmartDNS 同时支持指定特定域名 IP 地址，并高性匹配，可达到�
 
 SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/smartdns)
 
-## 本分支修改：定时 nftset 租约自愈
-
-启用现有的 `nftset-timeout yes` 后，本分支会按 DNS 结果的有效 TTL（缓存命中时为剩余 TTL）的 3 倍维护定时 nftset 元素：SmartDNS 自身的并发更新只会延长已有租约，不会缩短。SmartDNS 新鲜解析结果、缓存首次访问以及缓存到期路径会维护定时 nftset；普通有效且已经访问过的缓存命中不再同步查询 nftables，以避免 DNS 缓存热路径受到 Netlink 延迟影响。若外部工具在缓存有效期内清空动态集合，应在集合事务完成后 reload SmartDNS；OpenWrt RoutePolicy 当前应用流程已自动执行该 reload。该行为覆盖 A、AAAA，以及 HTTPS/SVCB 记录中的 IPv4/IPv6 hint。
-
-- 未新增配置项；未启用 `nftset-timeout` 时，永久 nftset 与 ipset 的行为保持不变。
-- Linux 6.12 及支持该能力的回移内核会原地更新时间；若内核静默忽略该更新，SmartDNS 会在一个原子 nftables batch 中替换元素。进程外工具同时改写同一元素不受 SmartDNS 的进程内锁协调。
-- 上游正式版本和此前本仓库使用的 `smartdns.conf`、OpenWrt `/etc/config/smartdns` 均可直接沿用，无需迁移。
-- 旧实验分支曾提供的 `nftset-timeout-multiplier`、`nftset-timeout-grace`、`nftset-timeout-min` 没有进入本实现；如果配置文件中曾手工加入这些未发布选项，请删除。已有的 `nftset-timeout yes` 继续有效。
-
-### OpenWrt 安装
+## OpenWrt 安装
 
 #### 一键升级
 
@@ -36,7 +27,7 @@ sh -c 'u=/tmp/smartdns-upgrade.sh; wget -qO "$u" https://raw.githubusercontent.c
 脚本运行后会首先询问升级源：
 
 1. **官方版本**：更新到 `pymumu/smartdns` 的 latest 正式 Release。
-2. **fork 修改版**：更新到 `FelixJI/smartdns` 最新发布的构建（包括最新 nightly），包含上文所述的定时 nftset 租约自愈修改。
+2. **fork 修改版**：更新到 `FelixJI/smartdns` 最新发布的构建（包括最新 nightly）。
 
 脚本仅支持 OpenWrt，会自动识别 `opkg`/apk、CPU 架构并下载匹配的核心包；如果已经安装 `luci-app-smartdns` 或 `luci-app-smartdns-lite`，会保持原有界面类型并同步升级，不会同时安装两种 LuCI 包。安装前会把 `/etc/config/smartdns` 和 `/etc/smartdns/` 备份到 `/tmp`。升级成功后，终端会明确显示本次选择的来源、实际版本号和 Release 标签。
 
