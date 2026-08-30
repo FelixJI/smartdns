@@ -17,20 +17,13 @@
  */
 
 #include "gtest/gtest.h"
-#include "dns_server/cache.h"
-#include "dns_server/context.h"
-#include "dns_server/ipset_nftset.h"
-#include "dns_server/request.h"
-#include "smartdns/dns_cache.h"
+#include "smartdns/dns_conf.h"
 #include "smartdns/lib/nftset.h"
 
-#include <algorithm>
 #include <arpa/inet.h>
-#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <cstring>
-#include <ctime>
 #include <endian.h>
 #include <errno.h>
 #include <linux/netfilter.h>
@@ -38,9 +31,14 @@
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <mutex>
-#include <thread>
-#include <vector>
+
+extern "C" {
+typedef int (*nftset_request_callback_t)(const void *request, int request_len, void *reply, int reply_len);
+
+void nftset_set_request_callback_for_test(nftset_request_callback_t callback);
+
+int dns_server_get_nftset_timeout_for_test(const struct dns_conf_group *conf, int timeout_value);
+}
 
 namespace {
 
@@ -59,8 +57,8 @@ struct rtattr *AddAttribute(struct nlmsghdr *header, int max_length, uint16_t ty
 		return nullptr;
 	}
 
-	auto *attribute = reinterpret_cast<struct rtattr *>(reinterpret_cast<uint8_t *>(header) +
-													  NLMSG_ALIGN(header->nlmsg_len));
+	auto *attribute = reinterpret_cast<struct rtattr *>(
+		reinterpret_cast<uint8_t *>(header) + NLMSG_ALIGN(header->nlmsg_len));
 	attribute->rta_type = type;
 	attribute->rta_len = attribute_length;
 	if (data != nullptr && length > 0) {
@@ -68,17 +66,6 @@ struct rtattr *AddAttribute(struct nlmsghdr *header, int max_length, uint16_t ty
 	}
 	header->nlmsg_len = new_length;
 	return attribute;
-}
-
-struct rtattr *StartNested(struct nlmsghdr *header, int max_length, uint16_t type)
-{
-	return AddAttribute(header, max_length, type, nullptr, 0);
-}
-
-void EndNested(struct nlmsghdr *header, struct rtattr *nested)
-{
-	nested->rta_len = reinterpret_cast<uint8_t *>(header) + NLMSG_ALIGN(header->nlmsg_len) -
-					  reinterpret_cast<uint8_t *>(nested);
 }
 
 const struct rtattr *FindAttribute(const void *data, int length, uint16_t type)
@@ -122,67 +109,48 @@ uint64_t ReadBigEndian64(const struct rtattr *attribute)
 
 int BuildSetReply(void *reply, int reply_length, bool timeout_set)
 {
-	if (reply_length < kPayloadMax) {
+	if (reply == nullptr || reply_length < kPayloadMax) {
 		return -1;
 	}
+
 	std::memset(reply, 0, reply_length);
-	auto *request = static_cast<NlmsgRequest *>(reply);
-	request->header.nlmsg_len = NLMSG_LENGTH(sizeof(struct nfgenmsg));
-	request->header.nlmsg_type = NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSET;
+	auto *message = static_cast<NlmsgRequest *>(reply);
+	message->header.nlmsg_len = NLMSG_LENGTH(sizeof(struct nfgenmsg));
+	message->header.nlmsg_type = NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSET;
 	uint32_t flags = htonl(timeout_set ? NFT_SET_TIMEOUT : 0);
-	AddAttribute(&request->header, reply_length, NFTA_SET_FLAGS, &flags, sizeof(flags));
-	return request->header.nlmsg_len;
+	AddAttribute(&message->header, reply_length, NFTA_SET_FLAGS, &flags, sizeof(flags));
+	return 0;
 }
 
-int BuildElementReply(void *reply, int reply_length, uint64_t expiration_ms, bool has_expiration)
+int BuildElementReply(void *reply, int reply_length)
 {
-	if (reply_length < kPayloadMax) {
+	if (reply == nullptr || reply_length < static_cast<int>(sizeof(NlmsgRequest))) {
 		return -1;
 	}
+
 	std::memset(reply, 0, reply_length);
-	auto *request = static_cast<NlmsgRequest *>(reply);
-	request->header.nlmsg_len = NLMSG_LENGTH(sizeof(struct nfgenmsg));
-	request->header.nlmsg_type = NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSETELEM;
-	auto *elements = StartNested(&request->header, reply_length,
-								 NLA_F_NESTED | NFTA_SET_ELEM_LIST_ELEMENTS);
-	auto *element = StartNested(&request->header, reply_length, NLA_F_NESTED | NFTA_LIST_ELEM);
-	if (has_expiration) {
-		uint64_t value = htobe64(expiration_ms);
-		AddAttribute(&request->header, reply_length, NFTA_SET_ELEM_EXPIRATION, &value, sizeof(value));
-	}
-	EndNested(&request->header, element);
-	EndNested(&request->header, elements);
-	return request->header.nlmsg_len;
+	auto *message = static_cast<NlmsgRequest *>(reply);
+	message->header.nlmsg_len = NLMSG_LENGTH(sizeof(struct nfgenmsg));
+	message->header.nlmsg_type = NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_NEWSETELEM;
+	return 0;
 }
 
 class FakeNftKernel {
 public:
 	bool timeout_set = true;
-	bool updates_existing_expiration = true;
 	bool exists = false;
-	bool has_expiration = true;
-	uint64_t expiration_ms = 0;
-	uint64_t last_timeout_ms = 0;
-	uint64_t last_expiration_ms = 0;
-	int last_key_length = 0;
-	uint16_t last_flags = 0;
 	int get_set_count = 0;
 	int get_element_count = 0;
-	int new_element_count = 0;
 	int delete_element_count = 0;
-	int request_count = 0;
-	int last_new_element_request = 0;
-	int last_delete_element_request = 0;
+	int new_element_count = 0;
+	uint64_t last_timeout_ms = 0;
 
 	int Request(const void *request_data, int request_length, void *reply, int reply_length)
 	{
-		std::lock_guard<std::mutex> guard(mutex_);
-		int request_id = ++request_count;
 		int remaining = request_length;
 		auto *header = static_cast<const struct nlmsghdr *>(request_data);
 		while (NLMSG_OK(header, remaining)) {
-			uint16_t message_type = header->nlmsg_type & 0xff;
-			switch (message_type) {
+			switch (header->nlmsg_type & 0xff) {
 			case NFT_MSG_GETSET:
 				get_set_count++;
 				return BuildSetReply(reply, reply_length, timeout_set);
@@ -192,15 +160,18 @@ public:
 					errno = ENOENT;
 					return -1;
 				}
-				return BuildElementReply(reply, reply_length, expiration_ms, has_expiration);
+				return BuildElementReply(reply, reply_length);
 			case NFT_MSG_DELSETELEM:
 				delete_element_count++;
-				last_delete_element_request = request_id;
 				exists = false;
 				break;
-			case NFT_MSG_NEWSETELEM:
-				ApplyNewElement(header, request_id);
+			case NFT_MSG_NEWSETELEM: {
+				new_element_count++;
+				exists = true;
+				auto *timeout = FindElementAttribute(header, NFTA_SET_ELEM_TIMEOUT);
+				last_timeout_ms = timeout == nullptr ? 0 : ReadBigEndian64(timeout);
 				break;
+			}
 			default:
 				break;
 			}
@@ -208,35 +179,6 @@ public:
 		}
 		return 0;
 	}
-
-private:
-	void ApplyNewElement(const struct nlmsghdr *header, int request_id)
-	{
-		bool element_existed = exists;
-		new_element_count++;
-		last_new_element_request = request_id;
-		last_flags = header->nlmsg_flags;
-		auto *timeout = FindElementAttribute(header, NFTA_SET_ELEM_TIMEOUT);
-		auto *expiration = FindElementAttribute(header, NFTA_SET_ELEM_EXPIRATION);
-		auto *key = FindElementAttribute(header, NFTA_SET_ELEM_KEY);
-		last_timeout_ms = timeout == nullptr ? 0 : ReadBigEndian64(timeout);
-		last_expiration_ms = expiration == nullptr ? 0 : ReadBigEndian64(expiration);
-		last_key_length = 0;
-		if (key != nullptr) {
-			int key_length = RTA_PAYLOAD(key);
-			auto *value = FindAttribute(RTA_DATA(key), key_length, NFTA_DATA_VALUE);
-			if (value != nullptr) {
-				last_key_length = RTA_PAYLOAD(value);
-			}
-		}
-		if (!element_existed || updates_existing_expiration) {
-			exists = true;
-			has_expiration = expiration != nullptr;
-			expiration_ms = last_expiration_ms != 0 ? last_expiration_ms : last_timeout_ms;
-		}
-	}
-
-	std::mutex mutex_;
 };
 
 FakeNftKernel *active_kernel = nullptr;
@@ -262,230 +204,65 @@ protected:
 
 	FakeNftKernel kernel;
 	const unsigned char ipv4[4] = {192, 0, 2, 1};
-	const unsigned char ipv6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 };
 
-TEST(NftsetProtocol, ParsesActualRemainingExpiration)
+TEST_F(NftsetTest, MissingTimedElementUsesExistingAddPath)
 {
-	unsigned char reply[kPayloadMax] = {};
-	int reply_length = BuildElementReply(reply, sizeof(reply), 30000, true);
-	uint64_t expiration_ms = 0;
-	int has_expiration = 0;
-	EXPECT_EQ(nftset_parse_element_reply_for_test(reply, reply_length, &expiration_ms, &has_expiration), 1);
-	EXPECT_EQ(expiration_ms, 30000U);
-	EXPECT_EQ(has_expiration, 1);
-}
-
-TEST_F(NftsetTest, MissingTimedElementsAreAddedForIpv4AndIpv6)
-{
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 300), 0);
+	ASSERT_EQ(nftset_add("inet", "filter", "policy4", ipv4, sizeof(ipv4), 300), 0);
 	EXPECT_TRUE(kernel.exists);
-	EXPECT_EQ(kernel.last_key_length, 4);
+	EXPECT_EQ(kernel.get_set_count, 1);
+	EXPECT_EQ(kernel.get_element_count, 1);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+	EXPECT_EQ(kernel.new_element_count, 1);
 	EXPECT_EQ(kernel.last_timeout_ms, 300000U);
-	EXPECT_EQ(kernel.last_expiration_ms, 300000U);
-
-	kernel.exists = false;
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy6", ipv6, sizeof(ipv6), 300), 0);
-	EXPECT_EQ(kernel.last_key_length, 16);
 }
 
-TEST_F(NftsetTest, ExistingTimedElementIsOnlyExtended)
+TEST_F(NftsetTest, ExistingTimedElementIsDeletedAndAddedAgain)
 {
 	kernel.exists = true;
-	kernel.expiration_ms = 30000;
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 300), 0);
-	EXPECT_EQ(kernel.new_element_count, 1);
-	EXPECT_EQ(kernel.expiration_ms, 300000U);
-	EXPECT_EQ(kernel.delete_element_count, 0);
-	EXPECT_NE(kernel.last_flags & NLM_F_CREATE, 0);
-	EXPECT_EQ(kernel.last_flags & NLM_F_EXCL, 0);
-
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 30), 0);
-	EXPECT_EQ(kernel.new_element_count, 1);
-	EXPECT_EQ(kernel.expiration_ms, 300000U);
-}
-
-TEST_F(NftsetTest, SharedIpKeepsLatestLeaseRegardlessOfResponseOrder)
-{
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 60), 0);
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 900), 0);
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 30), 0);
-	EXPECT_EQ(kernel.expiration_ms, 900000U);
-	EXPECT_EQ(kernel.delete_element_count, 0);
-}
-
-TEST_F(NftsetTest, LegacyKernelFallbackExtendsLeaseWhenDuplicateUpdateIsIgnored)
-{
-	kernel.updates_existing_expiration = false;
-	struct dns_request request = {};
-	std::strncpy(request.domain, "example.com", sizeof(request.domain) - 1);
-	struct dns_nftset_rule rule = {};
-	rule.familyname = "inet";
-	rule.nfttablename = "filter";
-	rule.nftsetname = "policy4";
-
-	unsigned long first_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 3);
-	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, first_timeout, 0);
-	ASSERT_EQ(kernel.expiration_ms, 9000U);
-
-	unsigned long later_timeout = dns_server_get_nftset_timeout_for_test(0, 0, 300);
-	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, later_timeout, 0);
-	EXPECT_EQ(kernel.expiration_ms, 900000U);
-	EXPECT_EQ(kernel.delete_element_count, 1);
-	EXPECT_EQ(kernel.last_delete_element_request, kernel.last_new_element_request);
-
-	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 30, 0);
-	EXPECT_EQ(kernel.expiration_ms, 900000U);
-	EXPECT_EQ(kernel.delete_element_count, 1);
-}
-
-TEST_F(NftsetTest, DescendingCacheTtlDoesNotMoveAbsoluteExpiryForward)
-{
-	for (unsigned long timeout : {900UL, 600UL, 300UL, 30UL}) {
-		ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), timeout), 0);
-	}
-	EXPECT_EQ(kernel.expiration_ms, 900000U);
-	EXPECT_EQ(kernel.new_element_count, 1);
-}
-
-TEST_F(NftsetTest, MissingElementSelfHealsAfterExternalFlush)
-{
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 300), 0);
-	kernel.exists = false;
-	kernel.expiration_ms = 0;
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), 270), 0);
+	ASSERT_EQ(nftset_add("inet", "filter", "policy4", ipv4, sizeof(ipv4), 300), 0);
 	EXPECT_TRUE(kernel.exists);
-	EXPECT_EQ(kernel.expiration_ms, 270000U);
-	EXPECT_EQ(kernel.new_element_count, 2);
+	EXPECT_EQ(kernel.delete_element_count, 1);
+	EXPECT_EQ(kernel.new_element_count, 1);
+	EXPECT_EQ(kernel.last_timeout_ms, 300000U);
 }
 
-TEST_F(NftsetTest, PermanentSetKeepsExistingElementUntouched)
+TEST_F(NftsetTest, ExistingPermanentElementSkipsSetMetadataQueryWhenTimeoutIsDisabled)
+{
+	kernel.exists = true;
+	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 0), 0);
+	EXPECT_EQ(kernel.get_element_count, 1);
+	EXPECT_EQ(kernel.get_set_count, 0);
+	EXPECT_EQ(kernel.delete_element_count, 0);
+	EXPECT_EQ(kernel.new_element_count, 0);
+}
+
+TEST_F(NftsetTest, ExistingPermanentElementRemainsUntouched)
 {
 	kernel.timeout_set = false;
 	kernel.exists = true;
-	kernel.has_expiration = false;
-	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 0), 0);
-	EXPECT_EQ(kernel.new_element_count, 0);
-	EXPECT_EQ(kernel.delete_element_count, 0);
-}
-
-TEST_F(NftsetTest, TimedModeFallsBackToLegacyPermanentSetBehavior)
-{
-	kernel.timeout_set = false;
 	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 300), 0);
 	EXPECT_TRUE(kernel.exists);
-	EXPECT_FALSE(kernel.has_expiration);
-	EXPECT_EQ(kernel.last_timeout_ms, 0U);
-	EXPECT_EQ(kernel.new_element_count, 1);
-
-	ASSERT_EQ(nftset_add("inet", "filter", "permanent", ipv4, sizeof(ipv4), 30), 0);
-	EXPECT_EQ(kernel.new_element_count, 1);
 	EXPECT_EQ(kernel.delete_element_count, 0);
-}
-
-TEST_F(NftsetTest, TimedOnlyCacheRefreshDoesNotWritePermanentSet)
-{
-	kernel.timeout_set = false;
-	ASSERT_EQ(nftset_upsert_timed("inet", "filter", "permanent", ipv4, sizeof(ipv4), 300), 0);
-	EXPECT_FALSE(kernel.exists);
 	EXPECT_EQ(kernel.new_element_count, 0);
-	EXPECT_EQ(kernel.delete_element_count, 0);
 }
 
-TEST_F(NftsetTest, DnsWriteSeamKeepsCacheOnlyAndLegacyPermanentPathsSeparate)
-{
-	struct dns_request request = {};
-	std::strncpy(request.domain, "example.com", sizeof(request.domain) - 1);
-	struct dns_nftset_rule rule = {};
-	rule.familyname = "inet";
-	rule.nfttablename = "filter";
-	rule.nftsetname = "permanent";
-	kernel.timeout_set = false;
-
-	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 300, 1);
-	EXPECT_FALSE(kernel.exists);
-	EXPECT_EQ(kernel.new_element_count, 0);
-
-	_dns_server_add_ipset_nftset(&request, nullptr, &rule, ipv4, sizeof(ipv4), 0, 300, 0);
-	EXPECT_TRUE(kernel.exists);
-	EXPECT_FALSE(kernel.has_expiration);
-	EXPECT_EQ(kernel.new_element_count, 1);
-}
-
-TEST_F(NftsetTest, ConcurrentSmartdnsUpdatesKeepLongestLease)
-{
-	std::vector<unsigned long> timeouts = {2, 30, 7, 900, 60, 300, 1, 120};
-	std::atomic<bool> start(false);
-	std::vector<std::thread> threads;
-	for (unsigned long timeout : timeouts) {
-		threads.emplace_back([&, timeout]() {
-			while (!start.load(std::memory_order_acquire)) {
-				std::this_thread::yield();
-			}
-			EXPECT_EQ(nftset_upsert_timed("inet", "filter", "policy4", ipv4, sizeof(ipv4), timeout), 0);
-		});
-	}
-	start.store(true, std::memory_order_release);
-	for (auto &thread : threads) {
-		thread.join();
-	}
-	EXPECT_EQ(kernel.expiration_ms, 900000U);
-	EXPECT_EQ(kernel.delete_element_count, 0);
-}
-
-TEST(NftsetDnsPath, FreshReplyKeepsPolicyLeaseForAuthoritativeTtl)
-{
-	/* The client sees the temporary reply TTL (3), while the policy set keeps the
-	 * address routable for the upstream/configured RR TTL (600 in this example). */
-	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(0, 3, 600), 1800UL);
-	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 100, 600), 300UL);
-	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, 0, 600), 0UL);
-	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(1, -1, 600), 0UL);
-
-	uint64_t expected = std::min<uint64_t>(static_cast<uint64_t>(ULONG_MAX),
-										 static_cast<uint64_t>(INT_MAX) * 3U);
-	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(0, 0, INT_MAX), static_cast<unsigned long>(expected));
-}
-
-TEST(NftsetDnsPath, ExpiredCacheUsesTheSameEffectiveTtlForReplyAndNftset)
+TEST(NftsetDnsPath, ServeExpiredLifetimeIsAddedOnlyToTimedNftset)
 {
 	struct dns_conf_group conf = {};
-	struct dns_request request = {};
-	request.conf = &conf;
-	request.ip_ttl = 600;
-	struct dns_cache cache = {};
-	cache.info.insert_time = time(NULL) - 10;
-	cache.info.ttl = 1;
-	struct dns_server_post_context context = {};
-	context.request = &request;
+	conf.ipset_nftset.nftset_timeout_enable = 1;
 
-	conf.dns_serve_expired_reply_ttl = 3;
-	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
-	EXPECT_EQ(context.reply_ttl, 3);
-	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 3);
+	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(&conf, 1800), 1800);
 
-	conf.dns_serve_expired_reply_ttl = 0;
-	context.reply_ttl = _dns_server_get_expired_ttl_reply(&request, &cache);
-	EXPECT_EQ(context.reply_ttl, 0);
-	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 600);
-	conf.dns_rr_ttl_reply_max = 5;
-	EXPECT_EQ(dns_server_get_effective_reply_ttl_for_test(&context), 5);
-}
+	conf.dns_serve_expired = 1;
+	conf.dns_serve_expired_ttl = 86400;
+	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(&conf, 1800), 88200);
 
-TEST(NftsetDnsPath, CacheRefreshesTimedNftsetOnlyWhenNormalSetRefreshIsRequired)
-{
-	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0, 0));
-	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(0, 1));
-	EXPECT_FALSE(dns_server_cache_should_refresh_timed_nftset_for_test(1, 0));
-	EXPECT_TRUE(dns_server_cache_should_refresh_timed_nftset_for_test(1, 1));
-}
+	conf.dns_serve_expired_ttl = INT_MAX;
+	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(&conf, 1800), INT_MAX);
 
-TEST(NftsetDnsPath, HttpsAndSvcbHintsCanReachPacketWalkerWithoutSelectedIp)
-{
-	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_HTTPS, 0));
-	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_SVCB, 0));
-	EXPECT_FALSE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_A, 0));
-	EXPECT_TRUE(dns_server_should_walk_ipset_nftset_for_test(DNS_T_A, 1));
+	conf.ipset_nftset.nftset_timeout_enable = 0;
+	EXPECT_EQ(dns_server_get_nftset_timeout_for_test(&conf, 1800), 0);
 }
 
 } // namespace
