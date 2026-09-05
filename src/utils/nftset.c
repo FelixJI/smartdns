@@ -29,6 +29,7 @@
 #include <linux/rtnetlink.h>
 #include <memory.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -48,6 +49,7 @@ struct nlmsgreq {
 enum { PAYLOAD_MAX = 2048 };
 
 static int nftset_fd;
+static pthread_mutex_t nftset_request_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #ifdef TEST
 typedef int (*nftset_request_callback_t)(const void *request, int request_len, void *reply, int reply_len);
@@ -206,7 +208,7 @@ static int _nftset_socket_init(void)
 	return 0;
 }
 
-static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
+static int _nftset_socket_request_unlocked(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
 {
 #ifdef TEST
 	if (nftset_request_callback != NULL) {
@@ -351,6 +353,18 @@ static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret
 	}
 
 	return 0;
+}
+
+static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret_msg_len)
+{
+	int ret;
+
+	/* Keep initialization and the complete shared-socket exchange in one critical section. */
+	pthread_mutex_lock(&nftset_request_lock);
+	ret = _nftset_socket_request_unlocked(msg, msg_len, ret_msg, ret_msg_len);
+	pthread_mutex_unlock(&nftset_request_lock);
+
+	return ret;
 }
 
 #ifdef TEST
