@@ -21,6 +21,8 @@
 #include "smartdns/lib/nftset.h"
 
 #include <arpa/inet.h>
+#include <atomic>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +33,7 @@
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <thread>
 
 extern "C" {
 typedef int (*nftset_request_callback_t)(const void *request, int request_len, void *reply, int reply_len);
@@ -188,6 +191,51 @@ int FakeRequest(const void *request, int request_length, void *reply, int reply_
 	return active_kernel->Request(request, request_length, reply, reply_length);
 }
 
+class ConcurrentRequestProbe {
+public:
+	std::atomic<int> active_requests{0};
+	std::atomic<bool> overlapping_requests{false};
+
+	int Request(const void *request_data, int request_length, void *reply, int reply_length)
+	{
+		(void)reply;
+		(void)reply_length;
+
+		int remaining = request_length;
+		auto *header = static_cast<const struct nlmsghdr *>(request_data);
+		while (NLMSG_OK(header, remaining)) {
+			switch (header->nlmsg_type & 0xff) {
+			case NFT_MSG_GETSETELEM: {
+				if (active_requests.fetch_add(1, std::memory_order_relaxed) != 0) {
+					overlapping_requests.store(true, std::memory_order_relaxed);
+				}
+
+				/* Widen the overlap window; this probe still depends on thread scheduling. */
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				active_requests.fetch_sub(1, std::memory_order_relaxed);
+				errno = ENOENT;
+				return -1;
+			}
+			case NFT_MSG_GETSET:
+				errno = ENOENT;
+				return -1;
+			default:
+				break;
+			}
+			header = NLMSG_NEXT(header, remaining);
+		}
+
+		return 0;
+	}
+};
+
+ConcurrentRequestProbe *active_request_probe = nullptr;
+
+int ConcurrentRequest(const void *request, int request_length, void *reply, int reply_length)
+{
+	return active_request_probe->Request(request, request_length, reply, reply_length);
+}
+
 class NftsetTest : public testing::Test {
 protected:
 	void SetUp() override
@@ -245,6 +293,49 @@ TEST_F(NftsetTest, ExistingPermanentElementRemainsUntouched)
 	EXPECT_TRUE(kernel.exists);
 	EXPECT_EQ(kernel.delete_element_count, 0);
 	EXPECT_EQ(kernel.new_element_count, 0);
+}
+
+TEST(NftsetConcurrency, SharedNetlinkSocketRequestIsSerialized)
+{
+	ConcurrentRequestProbe probe;
+	active_request_probe = &probe;
+	nftset_set_request_callback_for_test(ConcurrentRequest);
+
+	int previous_debug = dns_conf.nftset_debug_enable;
+	dns_conf.nftset_debug_enable = 0;
+
+	const unsigned char ipv4_a[4] = {192, 0, 2, 10};
+	const unsigned char ipv4_b[4] = {192, 0, 2, 11};
+	std::atomic<int> ready{0};
+	std::atomic<bool> start{false};
+	int result_a = -1;
+	int result_b = -1;
+
+	auto worker = [&](const unsigned char *address, int *result) {
+		ready.fetch_add(1, std::memory_order_relaxed);
+		while (!start.load(std::memory_order_acquire)) {
+			std::this_thread::yield();
+		}
+		*result = nftset_add("inet", "filter", "concurrency", address, 4, 0);
+	};
+
+	std::thread first(worker, ipv4_a, &result_a);
+	std::thread second(worker, ipv4_b, &result_b);
+	while (ready.load(std::memory_order_relaxed) != 2) {
+		std::this_thread::yield();
+	}
+	start.store(true, std::memory_order_release);
+
+	first.join();
+	second.join();
+
+	nftset_set_request_callback_for_test(nullptr);
+	active_request_probe = nullptr;
+	dns_conf.nftset_debug_enable = previous_debug;
+
+	EXPECT_EQ(result_a, 0);
+	EXPECT_EQ(result_b, 0);
+	EXPECT_FALSE(probe.overlapping_requests.load(std::memory_order_relaxed));
 }
 
 TEST(NftsetDnsPath, ServeExpiredLifetimeIsAddedOnlyToTimedNftset)
